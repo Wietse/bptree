@@ -6,17 +6,17 @@ use std::{
 use bytes::{Bytes, Buf, BytesMut, BufMut};
 
 
-const PAGE_SIZE: u16 = 4096;
+pub const PAGE_SIZE: usize = 4096;
 const MAGIC_HEADER: &[u8] = b"%store%";
 
 
-struct MemPage {
-    page_nr: u64,
-    data: Bytes,
+pub struct MemPage {
+    pub page_nr: usize,
+    pub data: Bytes,
 }
 
 
-struct Pages {
+pub struct Pages {
     fh: Option<File>,
 }
 
@@ -50,16 +50,16 @@ impl Pages {
 
     fn write(&mut self, page: &MemPage) -> io::Result<()> {
         let fh = self.fh.as_mut().unwrap();
-        let offset = PAGE_SIZE as u64 * page.page_nr;
+        let offset = (PAGE_SIZE * page.page_nr) as u64;
         fh.seek(SeekFrom::Start(offset))?;
         fh.write_all(page.data.as_ref())
     }
 
-    fn read(&mut self, page_nr: u64) -> io::Result<MemPage> {
+    fn read(&mut self, page_nr: usize) -> io::Result<MemPage> {
         let fh = self.fh.as_mut().unwrap();
-        let offset = PAGE_SIZE as u64 * page_nr;
+        let offset = (PAGE_SIZE * page_nr) as u64;
         fh.seek(SeekFrom::Start(offset))?;
-        let mut buf = BytesMut::with_capacity(PAGE_SIZE as usize);
+        let mut buf = BytesMut::with_capacity(PAGE_SIZE);
         fh.read(&mut buf)?;
         Ok(MemPage { page_nr, data: Bytes::from(buf) })
     }
@@ -68,9 +68,9 @@ impl Pages {
 
 
 struct Header {
-    page_count: u64,
-    root_page_nr: u64,
-    leaf_count: u64,
+    page_count: usize,
+    root_page_nr: usize,
+    leaf_count: usize,
 }
 
 
@@ -81,11 +81,11 @@ impl Header {
     }
 
     fn serialize(&self) -> MemPage {
-        let mut buf = BytesMut::with_capacity(PAGE_SIZE as usize);
+        let mut buf = BytesMut::with_capacity(PAGE_SIZE);
         buf.put(MAGIC_HEADER);
-        buf.put_u64(self.page_count);
-        buf.put_u64(self.root_page_nr);
-        buf.put_u64(self.leaf_count);
+        buf.put_u64(self.page_count as u64);
+        buf.put_u64(self.root_page_nr as u64);
+        buf.put_u64(self.leaf_count as u64);
         for _ in 0..buf.remaining_mut() {
             buf.put_u8(0);
         }
@@ -98,16 +98,16 @@ impl Header {
         if magic_header != MAGIC_HEADER {
             panic!("Not a store file");
         }
-        self.page_count = page.data.get_u64();
-        self.root_page_nr = page.data.get_u64();
-        self.leaf_count = page.data.get_u64();
+        self.page_count = page.data.get_u64() as usize;
+        self.root_page_nr = page.data.get_u64() as usize;
+        self.leaf_count = page.data.get_u64() as usize;
         Ok(())
     }
 
 }
 
 
-struct Store {
+pub struct Store {
     file_path: String,
     pages: Pages,
     header: Header,
@@ -116,7 +116,7 @@ struct Store {
 
 impl Store {
 
-    fn new(file_name: &str) -> Self {
+    pub fn new(file_name: &str) -> Self {
         Store {
             file_path: file_name.to_string(),
             pages: Pages::new(),
@@ -124,7 +124,7 @@ impl Store {
         }
     }
 
-    fn open(&mut self) -> io::Result<()> {
+    pub fn open(&mut self) -> io::Result<()> {
         let is_new_file = self.pages.open(&self.file_path)?;
         match is_new_file {
             false => self.read_header(),
@@ -132,8 +132,20 @@ impl Store {
         }
     }
 
-    fn close(&mut self) {
+    pub fn close(&mut self) {
         self.pages.close()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.header.leaf_count == 0
+    }
+
+    pub fn root_page_nr(&self) -> usize {
+        self.header.root_page_nr
+    }
+
+    pub fn set_root_page_nr(&mut self, root_page_nr: usize) {
+        self.header.root_page_nr = root_page_nr
     }
 
     fn write_header(&mut self) -> io::Result<()> {
@@ -145,17 +157,17 @@ impl Store {
         self.header.deserialize(&mut page)
     }
 
-    fn write_page(&mut self, page: &MemPage) -> io::Result<()> {
+    pub fn write_page(&mut self, page: &MemPage) -> io::Result<()> {
         assert!(page.page_nr <= self.header.page_count);
         self.pages.write(page)
     }
 
-    fn read_page(&mut self, page_nr: u64) -> io::Result<MemPage> {
+    pub fn read_page(&mut self, page_nr: usize) -> io::Result<MemPage> {
         assert!(page_nr <= self.header.page_count);
         self.pages.read(page_nr)
     }
 
-    fn next_page(&mut self) -> io::Result<u64> {
+    pub fn next_page(&mut self) -> io::Result<usize> {
         let next_page_nr = self.header.page_count;
         self.header.page_count += 1;
         self.write_header()?;
