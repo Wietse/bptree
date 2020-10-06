@@ -1,9 +1,11 @@
-mod store;
-
-use std::{io, fs};
-use bytes::{Buf, BytesMut, BufMut};
+use std::{
+    io::{self, Write, Seek, SeekFrom},
+    fs::{self, OpenOptions, File},
+    path::Path,
+};
+use serde::{Serialize, Deserialize};
+use bincode::{deserialize, serialize, deserialize_from, serialize_into};
 use num_integer::Integer;
-use store::{PAGE_SIZE, MemPage, Store};
 
 
 type KeyType = u64;
@@ -12,19 +14,127 @@ type ValueType = u64;
 
 const BT_ORDER: u16 = 84;
 const BT_MAX_KEY_COUNT: u16 = 2 * BT_ORDER - 1;
+pub const PAGE_SIZE: usize = 4096;
+const MAGIC_HEADER: &str = "%bptree%";
 
 
+#[derive(Debug)]
+pub struct Pages {
+    fh: Option<File>,
+}
+
+
+impl Pages {
+
+    fn new() -> Self {
+        Pages { fh: None }
+    }
+
+    fn is_open(&self) -> bool {
+        match self.fh {
+            Some(_) => true,
+            None => false,
+        }
+    }
+
+    fn open(&mut self, file_path: &str) -> io::Result<bool> {
+        if !self.is_open() {
+            let is_new_file = !Path::new(file_path).exists();
+            let fh = OpenOptions::new().read(true).write(true).create(is_new_file).open(file_path)?;
+            self.fh = Some(fh);
+            return Ok(is_new_file);
+        }
+        Ok(false)
+    }
+
+    fn close(&mut self) -> io::Result<()> {
+        let fh = self.fh.as_mut().unwrap();
+        fh.sync_all()?;
+        self.fh = None;
+        Ok(())
+    }
+
+    fn write_header(&mut self, header: &Header) -> Result<(), std::boxed::Box<bincode::ErrorKind>> {
+        println!("write_header: {:?}", header);
+        let mut fh = self.fh.as_mut().unwrap();
+        fh.seek(SeekFrom::Start(0))?;
+        let result = serialize_into(&mut fh, header);
+        let pos = fh.seek(SeekFrom::Current(0)).unwrap() as usize;
+        assert!(pos < PAGE_SIZE, "Header wrote {} bytes", pos);
+        let padding = PAGE_SIZE - pos;
+        if padding > 0 {
+            fh.write(&vec![0u8; padding]).unwrap();
+        }
+        return result;
+    }
+
+    fn read_header(&mut self) -> Result<Header, std::boxed::Box<bincode::ErrorKind>> {
+        let fh = self.fh.as_mut().unwrap();
+        fh.seek(SeekFrom::Start(0))?;
+        let header: Header = deserialize_from(fh)?;
+        println!("read_header: {:?}", header);
+        Ok(header)
+    }
+
+    fn write_node(&mut self, node: &Node) -> Result<(), std::boxed::Box<bincode::ErrorKind>> {
+        let mut fh = self.fh.as_mut().unwrap();
+        let offset = PAGE_SIZE * node.page_nr;
+        fh.seek(SeekFrom::Start(offset as u64))?;
+        let result = serialize_into(&mut fh, node);
+        let pos = fh.seek(SeekFrom::Current(0)).unwrap() as usize;
+        assert!(pos < offset + PAGE_SIZE, "pos = {}, offset+PAGE_SIZE = {}", pos, offset+PAGE_SIZE);
+        let padding = offset + PAGE_SIZE - pos;
+        if padding > 0 {
+            fh.write(&vec![0u8; padding]).unwrap();
+        }
+        return result;
+    }
+
+    fn read_node(&mut self, page_nr: usize) -> Result<Node, std::boxed::Box<bincode::ErrorKind>> {
+        let fh = self.fh.as_mut().unwrap();
+        let offset = (PAGE_SIZE * page_nr) as u64;
+        fh.seek(SeekFrom::Start(offset))?;
+        let node: Node = deserialize_from(fh)?;
+        Ok(node)
+    }
+
+}
+
+
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+struct Header {
+    magic_header: String,
+    page_count: usize,
+    root_page_nr: usize,
+    leaf_count: usize,
+}
+
+
+impl Header {
+    pub fn new() -> Header {
+        Header {
+            magic_header: MAGIC_HEADER.to_string(),
+            page_count: 0,
+            root_page_nr: 0,
+            leaf_count: 0
+        }
+    }
+}
+
+
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub struct Node {
     page_nr: usize,
     is_leaf: bool,
-    keys: Vec<u64>,
-    entries: Vec<u64>,
+    keys: Vec<KeyType>,
+    entries: Vec<ValueType>,
 }
 
 
 impl Node {
 
-    fn new(page_nr: usize, is_leaf: bool, keys: &[u64], entries: &[u64]) -> Node {
+    fn new(page_nr: usize, is_leaf: bool, keys: &[KeyType], entries: &[ValueType]) -> Node {
+        assert!(page_nr > 0);
         let mut node = Node {
             page_nr,
             is_leaf,
@@ -33,7 +143,7 @@ impl Node {
         };
         node.keys.extend_from_slice(keys);
         node.entries.extend_from_slice(entries);
-        node
+        return node;
     }
 
     fn is_full(&self) -> bool {
@@ -62,49 +172,14 @@ impl Node {
         (split_key, node)
     }
 
-    fn serialize(&self) -> MemPage {
-        let mut buf = BytesMut::with_capacity(PAGE_SIZE as usize);
-        buf.put_u8(self.is_leaf as u8);
-        buf.put_u64(self.keys.len() as u64);
-        for key in &self.keys {
-            buf.put_u64(*key);
-        }
-        buf.put_u64(self.entries.len() as u64);
-        for entry in &self.entries {
-            buf.put_u64(*entry);
-        }
-        for _ in 0..buf.remaining_mut() {
-            buf.put_u8(0);
-        }
-        MemPage { page_nr: 0, data: buf.freeze() }
-    }
-
-    fn deserialize(page: &mut MemPage) -> io::Result<Self> {
-        let mut node = Self {
-            page_nr: page.page_nr,
-            is_leaf: page.data.get_u8() == 1,
-            keys: Vec::new(),
-            entries: Vec::new(),
-        };
-        let key_len = page.data.get_u64() as usize;
-        node.keys.reserve(key_len);
-        for _ in 0..key_len {
-            node.keys.push(page.data.get_u64());
-        }
-        let entries_len = page.data.get_u64() as usize;
-        node.entries.reserve(entries_len);
-        for _ in 0..entries_len {
-            node.entries.push(page.data.get_u64());
-        }
-        Ok(node)
-    }
-
 }
 
 
-struct BTree {
+#[derive(Debug)]
+pub struct BTree {
     dir_path: String,
-    store: Store,
+    header: Header,
+    store: Pages,
 }
 
 
@@ -113,83 +188,68 @@ impl BTree {
     pub fn open(dir_path: &str) -> io::Result<Self> {
         fs::create_dir_all(dir_path)?;
         let fname = format!("{}/btree", dir_path);
-        let mut bt = BTree { dir_path: dir_path.to_string(), store: Store::new(&fname) };
-        bt.store.open()?;
+        let mut bt = BTree {
+            dir_path: dir_path.to_string(),
+            header: Header::new(),
+            store: Pages::new(),
+        };
+        let is_new_file = bt.store.open(&fname)?;
+        match is_new_file {
+            false => bt.load_header(),
+            true => bt.init_header(),
+        }
         Ok(bt)
     }
 
-    pub fn close(&mut self) {
+    fn init_header(&mut self) {
+        self.next_page().unwrap();
+    }
+
+    fn load_header(&mut self) {
+        self.header = self.store.read_header().unwrap()
+    }
+
+    pub fn close(&mut self) -> io::Result<()> {
+        self.store.write_header(&self.header).unwrap();
         self.store.close()
     }
 
-    fn is_empty(&self) -> bool {
-        self.store.is_empty()
+    pub fn is_empty(&self) -> bool {
+        self.header.leaf_count == 0
     }
 
-    fn root_page_nr(&self) -> usize {
-        self.store.root_page_nr()
+    pub fn len(&self) -> usize {
+        self.header.leaf_count
     }
 
-    fn load_node(&mut self, page_nr: usize) -> io::Result<Node> {
-        Node::deserialize(&mut self.store.read_page(page_nr)?)
-    }
-
-    fn store_node(&mut self, node: &Node) -> io::Result<()> {
-        self.store.write_page(&node.serialize())
-    }
-
-    fn insert_recursive(&mut self, page_nr: usize, key: KeyType, value: ValueType) -> Result<Option<(KeyType, Node)>, ValueType> {
-        let mut node = self.load_node(page_nr).unwrap();
-        let position = node.keys.binary_search(&key);
-        if node.is_leaf {
-            match position {
-                Err(i) => {
-                    node.keys.insert(i, key);
-                    node.entries.insert(i, value);
-                },
-                Ok(i) => {
-                    let result = Err(node.entries[i]);
-                    node.entries[i] = value;
-                    return result;
-                }
-            }
-        } else {
-            let i = position.unwrap();
-            if let Ok(Some((split_key, split_node))) = self.insert_recursive(node.entries[i] as usize, key, value) {
-                self.store_node(&split_node).unwrap();
-                let i = node.keys.binary_search(&split_key).unwrap();
-                node.keys.insert(i, split_key);
-                node.entries.insert(i+1, split_node.page_nr as u64);
-            }
-        }
-        let result;
-        if node.is_full() {
-            result = Some(node.split(self.store.next_page().unwrap()));
-        } else {
-            result = None;
-        }
-        self.store_node(&node).unwrap();
-        Ok(result)
+    pub fn next_page(&mut self) -> io::Result<usize> {
+        let next_page_nr = self.header.page_count;
+        self.header.page_count += 1;
+        self.store.write_header(&self.header).unwrap();
+        Ok(next_page_nr)
     }
 
     pub fn insert(&mut self, key: KeyType, value: ValueType) -> Result<(), ValueType> {
         if self.is_empty() {
-            let root = Node::new(self.root_page_nr(), true, &[key], &[value]);
-            self.store_node(&root).unwrap();
-            self.store.next_page().unwrap();
+            self.header.root_page_nr = 1;
+            let root = Node::new(self.header.root_page_nr, true, &[key], &[value]);
+            self.header.leaf_count += 1;
+            self.store.write_node(&root).unwrap();
+            self.next_page().unwrap();
             return Ok(());
         }
-        match self.insert_recursive(self.root_page_nr(), key, value) {
+        match self.insert_recursive(self.header.root_page_nr, key, value) {
             Ok(Some((split_key, split_node))) => {
-                self.store_node(&split_node).unwrap();
+                self.store.write_node(&split_node).unwrap();
                 let new_root = Node::new(
-                    self.store.next_page().unwrap(),
+                    self.next_page().unwrap(),
                     false,
                     &[split_key],
-                    &[self.root_page_nr() as u64, split_node.page_nr as u64]
+                    &[self.header.root_page_nr as u64, split_node.page_nr as u64]
                     );
-                self.store_node(&new_root).unwrap();
-                self.store.set_root_page_nr(new_root.page_nr);
+                self.store.write_node(&new_root).unwrap();
+                self.header.root_page_nr = new_root.page_nr;
+                self.store.write_header(&self.header).unwrap();
                 Ok(())
             },
             Ok(None) => Ok(()),
@@ -201,11 +261,11 @@ impl BTree {
         if self.is_empty() {
             return None;
         }
-        let mut node = self.load_node(self.root_page_nr()).unwrap();
+        let mut node = self.store.read_node(self.header.root_page_nr).unwrap();
         while !node.is_leaf {
             match node.keys.binary_search(&key) {
                 Ok(i) | Err(i) => {
-                    node = self.load_node(node.entries[i] as usize).unwrap();
+                    node = self.store.read_node(node.entries[i] as usize).unwrap();
                 }
             }
         }
@@ -213,6 +273,50 @@ impl BTree {
             Ok(i) => Some(node.entries[i]),
             Err(_) => None
         }
+    }
+
+    fn insert_recursive(&mut self, page_nr: usize, key: KeyType, value: ValueType) -> Result<Option<(KeyType, Node)>, ValueType> {
+        let mut node = self.store.read_node(page_nr).unwrap();
+        let position = node.keys.binary_search(&key);
+        if node.is_leaf {
+            match position {
+                Err(i) => {
+                    // The key was not found -> new entry.
+                    node.keys.insert(i, key);
+                    node.entries.insert(i, value);
+                    self.header.leaf_count += 1;
+                },
+                Ok(i) => {
+                    // The key was found -> we assign the new value, but return an error with the
+                    // old value.
+                    let result = Err(node.entries[i]);
+                    node.entries[i] = value;
+                    return result;
+                }
+            }
+        } else {
+            let i = match position { Ok(i) | Err(i) => i };
+            // let idx;
+            // match position {
+            //     Ok(i) | Err(i) => idx = i,
+            // }
+            if let Ok(Some((split_key, split_node))) = self.insert_recursive(node.entries[i] as usize, key, value) {
+                self.store.write_node(&split_node).unwrap();
+                let i = match node.keys.binary_search(&split_key) { Ok(i) | Err(i) => i };
+                // let i = node.keys.binary_search(&split_key).unwrap();
+                node.keys.insert(i, split_key);
+                node.entries.insert(i+1, split_node.page_nr as u64);
+            }
+        }
+        let result;
+        if node.is_full() {
+            result = Some(node.split(self.next_page().unwrap()));
+        } else {
+            result = None;
+        }
+        self.store.write_node(&node).unwrap();
+        println!("insert_recursive: {:?}", self.header);
+        Ok(result)
     }
 
 }
