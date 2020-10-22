@@ -18,45 +18,43 @@ fn test1() {
 }
 
 
-#[test]
-fn test2() {
-    let fname = "tmp/test2";
-    if Path::new(fname).is_dir() {
-        fs::remove_dir_all(fname).unwrap();
+fn range_test(n: u64) {
+    let fname = format!("tmp/test{}", n);
+    if Path::new(&fname).is_dir() {
+        fs::remove_dir_all(&fname).unwrap();
     }
-    let mut bt = BTree::open(fname).unwrap();
-    for i in 0..100 {
+    let mut bt = BTree::open(&fname).unwrap();
+    for i in 0..n {
         bt.insert(i, i*10).unwrap();
     }
-    assert_eq!(100, bt.len());
-    assert_eq!(50, bt.get(5).unwrap());
+    assert_eq!(n, bt.len() as u64);
+    for i in 0..n {
+        match bt.get(i) {
+            Some(v) => assert_eq!(i*10, v, "Unexpected value {} for key {}", v, i),
+            None => assert!(false, "Key {} NOT FOUND", i),
+        }
+    }
     bt.close().unwrap();
 
-    bt = BTree::open(fname).unwrap();
-    assert_eq!(100, bt.len());
-    assert_eq!(700, bt.get(70).unwrap());
-    assert_eq!(320, bt.get(32).unwrap());
+    bt = BTree::open(&fname).unwrap();
+    assert_eq!(n, bt.len() as u64);
+    for i in 0..n {
+        match bt.get(i) {
+            Some(v) => assert_eq!(i*10, v, "Unexpected value {} for key {}", v, i),
+            None => assert!(false, "Key {} NOT FOUND", i),
+        }
+    }
     bt.close().unwrap();
 }
 
 
 #[test]
-fn test3() {
-    let fname = "tmp/test3";
-    if Path::new(fname).is_dir() {
-        fs::remove_dir_all(fname).unwrap();
-    }
-    let mut bt = BTree::open(fname).unwrap();
-    for i in 0..200 {
-        bt.insert(i, i*10).unwrap();
-    }
-    assert_eq!(200, bt.len());
-    assert_eq!(50, bt.get(5).unwrap());
-    bt.close().unwrap();
+fn test2() {
+    range_test(10);
+}
 
-    bt = BTree::open(fname).unwrap();
-    assert_eq!(100, bt.len());
-    assert_eq!(700, bt.get(70).unwrap());
-    assert_eq!(320, bt.get(32).unwrap());
-    bt.close().unwrap();
+
+#[test]
+fn test3() {
+    range_test(1000);
 }
