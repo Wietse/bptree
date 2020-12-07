@@ -14,23 +14,21 @@ use tempfile::TempDir;
 // Should get previously stored value.
 #[test]
 fn get_stored_value() -> Result<()> {
-    // let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-    // let mut store = BTree::open(temp_dir.path())?;
-    let mut store = BTree::open("temp")?;
-    println!("{:?}", store);
+    let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+    let mut btree = BTree::open(temp_dir.path())?;
+    println!("{:?}", btree);
 
-    store.insert(1, 1000)?;
-    store.insert(2, 2000)?;
+    btree.insert(1, 1000)?;
+    btree.insert(2, 2000)?;
 
-    assert_eq!(store.get(1)?, Some(1000));
-    assert_eq!(store.get(2)?, Some(2000));
+    assert_eq!(btree.get(1)?, Some(1000));
+    assert_eq!(btree.get(2)?, Some(2000));
 
     // Open from disk again and check persistent data.
-    drop(store);
-    // let mut store = BTree::open(temp_dir.path())?;
-    let mut store = BTree::open("temp")?;
-    assert_eq!(store.get(1)?, Some(1000));
-    assert_eq!(store.get(2)?, Some(2000));
+    drop(btree);
+    let mut btree = BTree::open(temp_dir.path())?;
+    assert_eq!(btree.get(1)?, Some(1000));
+    assert_eq!(btree.get(2)?, Some(2000));
 
     Ok(())
 }
@@ -39,29 +37,29 @@ fn get_stored_value() -> Result<()> {
 #[test]
 fn get_stored_value_from_multiple_pages() -> Result<()> {
     // let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-    // let mut store = BTree::open(temp_dir.path())?;
-    let mut store = BTree::open("temp2")?;
-    println!("{:?}", store);
+    // let mut btree = BTree::open(temp_dir.path())?;
+    let mut btree = BTree::open("temp2")?;
+    println!("{:?}", btree);
 
     let n = 10000;
 
     for i in 1..n {
-        store.insert(i, i*10)?;
+        btree.insert(i, i*10)?;
     }
-    assert_eq!(n-1, store.len() as u64);
+    assert_eq!(n-1, btree.len() as u64);
     for i in 1..n {
-        match store.get(i)? {
+        match btree.get(i)? {
             Some(v) => assert_eq!(i*10, v, "Unexpected value {} for key {}", v, i),
             None => assert!(false, "Key {} NOT FOUND", i),
         }
     }
 
-    drop(store);
+    drop(btree);
 
-    store = BTree::open("temp2")?;
-    assert_eq!(n-1, store.len() as u64);
+    btree = BTree::open("temp2")?;
+    assert_eq!(n-1, btree.len() as u64);
     for i in 1..n {
-        match store.get(i)? {
+        match btree.get(i)? {
             Some(v) => assert_eq!(i*10, v, "Unexpected value {} for key {}", v, i),
             None => assert!(false, "Key {} NOT FOUND", i),
         }
