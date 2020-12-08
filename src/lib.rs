@@ -17,8 +17,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+
 const PAGE_SIZE: u64 = 4096;
 const MAGIC_HEADER: &str = "%bptree%";
+
 
 // Computing n (the number of search keys in a node):
 //
@@ -57,10 +59,12 @@ fn max_key_count(size_key: u64, size_value: u64) -> u64 {
     (PAGE_SIZE - size_value - 17) / (size_key + size_value)
 }
 
+
 fn split_at(size_key: u64, size_value: u64) -> usize {
     let max_key_count = max_key_count(size_key, size_value);
     ((max_key_count / 2) + (max_key_count % 2)) as usize
 }
+
 
 fn meta_file_path(dirname: &Path) -> PathBuf {
     let mut path = PathBuf::from(dirname);
@@ -68,11 +72,13 @@ fn meta_file_path(dirname: &Path) -> PathBuf {
     path
 }
 
+
 fn db_path(directory: &Path) -> PathBuf {
     let mut path = PathBuf::from(directory);
     path.push("db");
     path
 }
+
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BTree<K, V>
@@ -95,6 +101,7 @@ where
     #[serde(skip)]
     fh: Option<File>,
 }
+
 
 impl<K, V> BTree<K, V>
 where
@@ -143,6 +150,22 @@ where
         Ok(original_value)
     }
 
+    fn create_first_root(&mut self, key: K, value: V) -> Result<()> {
+        self.root_page_nr = self.next_page_nr();
+        let root = BTNode::new_leaf(self.root_page_nr, &[key], &[value], None);
+        self.entry_count += 1;
+        self.store_node(&root)?;
+        Ok(())
+    }
+
+    fn create_new_root(&mut self, key: K, new_page_nr: u64) -> Result<()> {
+        let old_root_page_nr = self.root_page_nr;
+        self.root_page_nr = self.next_page_nr();
+        let new_root = BTNode::new_internal(self.root_page_nr, &[key], &[old_root_page_nr, new_page_nr]);
+        self.store_node(&new_root)?;
+        Ok(())
+    }
+
     fn next_page_nr(&mut self) -> u64 {
         let page_nr = self.node_count;
         self.node_count += 1;
@@ -187,32 +210,9 @@ where
         self.load_node(self.root_page_nr)
     }
 
-    fn create_first_root(&mut self, key: K, value: V) -> Result<()> {
-        self.root_page_nr = self.next_page_nr();
-        let root = BTNode::new_leaf(self.root_page_nr, &[key], &[value], None);
-        self.entry_count += 1;
-        self.store_node(&root)?;
-        Ok(())
-    }
-
-    fn create_new_root(&mut self, key: K, new_page_nr: u64) -> Result<()> {
-        let old_root_page_nr = self.root_page_nr;
-        self.root_page_nr = self.next_page_nr();
-        let new_root =
-            BTNode::new_internal(self.root_page_nr, &[key], &[old_root_page_nr, new_page_nr]);
-        self.store_node(&new_root)?;
-        Ok(())
-    }
-
     fn load_node(&mut self, page_nr: u64) -> Result<BTNode<K, V>> {
         if self.fh.is_none() {
-            self.fh = Some(
-                OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .open(db_path(&self.directory))?,
-            );
+            self.fh = Some(OpenOptions::new().read(true).write(true).create(true).open(db_path(&self.directory))?);
         }
         let fh = self.fh.as_mut().ok_or(Error::InvalidFileHandle)?;
         let offset = PAGE_SIZE * page_nr;
@@ -223,13 +223,7 @@ where
 
     fn store_node(&mut self, node: &BTNode<K, V>) -> Result<()> {
         if self.fh.is_none() {
-            self.fh = Some(
-                OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .open(db_path(&self.directory))?,
-            );
+            self.fh = Some(OpenOptions::new().read(true).write(true).create(true).open(db_path(&self.directory))?);
         }
         let fh = self.fh.as_mut().ok_or(Error::InvalidFileHandle)?;
         let offset = PAGE_SIZE * node.page_nr();
@@ -237,13 +231,7 @@ where
         node.serialize_into(fh)?;
         // fh.sync_all()?;
         let pos = fh.seek(SeekFrom::Current(0))?;
-        assert!(
-            pos < offset + PAGE_SIZE,
-            "{:?} - pos = {}, offset+PAGE_SIZE = {}",
-            node,
-            pos,
-            offset + PAGE_SIZE
-        );
+        assert!(pos < offset + PAGE_SIZE, "{:?} - pos = {}, offset+PAGE_SIZE = {}", node, pos, offset + PAGE_SIZE);
         let padding = offset + PAGE_SIZE - pos;
         if padding > 0 {
             fh.write_all(&vec![0u8; padding as usize])?;
@@ -251,6 +239,7 @@ where
         Ok(())
     }
 }
+
 
 // Make sure the meta data for the BTree is written to disk
 impl<K, V> Drop for BTree<K, V>

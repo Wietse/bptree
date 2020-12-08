@@ -14,7 +14,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+
 type PagePtr = u64;
+
 
 #[derive(Debug)]
 pub struct Leaf<K, V> {
@@ -24,6 +26,7 @@ pub struct Leaf<K, V> {
     next: Option<PagePtr>,
 }
 
+
 impl<K, V> Leaf<K, V>
 where
     K: Debug + Default + Clone + Copy + Ord + Serialize + DeserializeOwned,
@@ -31,12 +34,7 @@ where
 {
     fn new(page_nr: u64, keys: &[K], entries: &[V], next: Option<PagePtr>) -> Self {
         // let padding = (size - 2 * order * (mem::size_of::<K>() + mem::size_of::<V>()) - mem::size_of::<PagePtr>()) as u64;
-        Leaf {
-            page_nr,
-            keys: keys.to_vec(),
-            entries: entries.to_vec(),
-            next,
-        }
+        Leaf { page_nr, keys: keys.to_vec(), entries: entries.to_vec(), next }
     }
 
     fn is_full(&self, max_key_count: u64) -> bool {
@@ -50,12 +48,7 @@ where
         }
     }
 
-    pub fn set(
-        mut self,
-        btree: &mut BTree<K, V>,
-        key: K,
-        value: V,
-    ) -> Result<(Option<(K, PagePtr)>, Option<V>)>
+    pub fn set(mut self, btree: &mut BTree<K, V>, key: K, value: V) -> Result<(Option<(K, PagePtr)>, Option<V>)>
     where
         V: Debug + Clone + Copy + Serialize + DeserializeOwned,
     {
@@ -68,8 +61,7 @@ where
             }
             Err(i) => match self.is_full(btree.max_key_count) {
                 true => {
-                    let (split_key, mut new_leaf) =
-                        self.split(btree.next_page_nr(), btree.split_at);
+                    let (split_key, mut new_leaf) = self.split(btree.next_page_nr(), btree.split_at);
                     let split_page_nr = new_leaf.page_nr;
                     match i < btree.split_at {
                         true => self.insert(i, key, value),
@@ -93,12 +85,7 @@ where
     // [v0, v1, v2, v3] -> [v0, v1] | [v2, v3]
     fn split(&mut self, page_nr: u64, split_at: usize) -> (K, Self) {
         let split_key = self.keys[split_at];
-        let node = Self::new(
-            page_nr,
-            &self.keys[split_at..],
-            &self.entries[split_at..],
-            None,
-        );
+        let node = Self::new(page_nr, &self.keys[split_at..], &self.entries[split_at..], None);
         self.next = Some(page_nr);
         self.keys.drain(split_at..);
         self.entries.drain(split_at..);
@@ -128,6 +115,7 @@ where
     }
 }
 
+
 #[derive(Debug)]
 pub struct Internal<K> {
     page_nr: PagePtr,
@@ -135,17 +123,14 @@ pub struct Internal<K> {
     entries: Vec<PagePtr>,
 }
 
+
 impl<K> Internal<K>
 where
     K: Debug + Default + Clone + Copy + Ord + Serialize + DeserializeOwned,
 {
     fn new(page_nr: u64, keys: &[K], entries: &[PagePtr]) -> Self {
         // let padding = (size - 2 * order * (mem::size_of::<K>() + mem::size_of::<PagePtr>()) - mem::size_of::<PagePtr>()) as u64;
-        Internal {
-            page_nr,
-            keys: keys.to_vec(),
-            entries: entries.to_vec(),
-        }
+        Internal { page_nr, keys: keys.to_vec(), entries: entries.to_vec() }
     }
 
     fn is_full(&self, max_key_count: u64) -> bool {
@@ -166,22 +151,13 @@ where
     fn split(&mut self, page_nr: u64, split_at: usize) -> (K, Self) {
         let split_key = self.keys[split_at];
         let node: Internal<K>;
-        node = Internal::new(
-            page_nr,
-            &self.keys[split_at + 1..],
-            &self.entries[split_at + 1..],
-        );
+        node = Internal::new(page_nr, &self.keys[split_at + 1..], &self.entries[split_at + 1..]);
         self.keys.drain(split_at..);
         self.entries.drain(split_at + 1..);
         (split_key, node)
     }
 
-    pub fn set<V>(
-        mut self,
-        btree: &mut BTree<K, V>,
-        key: K,
-        value: V,
-    ) -> Result<(Option<(K, PagePtr)>, Option<V>)>
+    pub fn set<V>(mut self, btree: &mut BTree<K, V>, key: K, value: V) -> Result<(Option<(K, PagePtr)>, Option<V>)>
     where
         V: Debug + Default + Clone + Copy + Serialize + DeserializeOwned,
     {
@@ -195,8 +171,7 @@ where
             (Some((key, page_nr)), v) => match self.keys.binary_search(&key) {
                 Err(i) => match self.is_full(btree.max_key_count) {
                     true => {
-                        let (split_key, mut new_node) =
-                            self.split(btree.next_page_nr(), btree.split_at);
+                        let (split_key, mut new_node) = self.split(btree.next_page_nr(), btree.split_at);
                         let split_page_nr = new_node.page_nr;
                         match i < btree.split_at {
                             true => self.insert(i, key, page_nr),
@@ -229,20 +204,18 @@ where
     }
 
     pub fn deserialize_from(fh: &File, page_nr: u64) -> Result<Self> {
-        let node = Self {
-            page_nr,
-            keys: bincode::deserialize_from(fh)?,
-            entries: bincode::deserialize_from(fh)?,
-        };
+        let node = Self { page_nr, keys: bincode::deserialize_from(fh)?, entries: bincode::deserialize_from(fh)? };
         Ok(node)
     }
 }
+
 
 #[derive(Debug)]
 pub enum BTNode<K, V> {
     Internal(Internal<K>),
     Leaf(Leaf<K, V>),
 }
+
 
 impl<K, V> BTNode<K, V>
 where
@@ -257,12 +230,7 @@ where
         BTNode::Internal(Internal::new(page_nr, keys, entries))
     }
 
-    pub fn set(
-        self,
-        btree: &mut BTree<K, V>,
-        key: K,
-        value: V,
-    ) -> Result<(Option<(K, PagePtr)>, Option<V>)>
+    pub fn set(self, btree: &mut BTree<K, V>, key: K, value: V) -> Result<(Option<(K, PagePtr)>, Option<V>)>
     where
         V: Debug + Clone + Copy + Serialize + DeserializeOwned,
     {
