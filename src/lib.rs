@@ -6,7 +6,7 @@ mod error;
 mod node;
 
 pub use error::{Error, Result};
-use node::BTNode;
+pub use node::{PagePtr, Leaf, BTNode};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     fmt::Debug,
@@ -121,6 +121,14 @@ where
         self.entry_count as usize
     }
 
+    pub fn keys(&mut self) -> BTreeIterator<K, V> {
+        BTreeIterator::new(self).unwrap().into_iter()
+    }
+
+    pub fn values(&mut self) -> BTreeValueIterator<K, V> {
+        BTreeValueIterator::new(self).unwrap().into_iter()
+    }
+
     pub fn get(&mut self, key: K) -> Result<Option<V>> {
         if self.len() == 0 {
             return Ok(None);
@@ -206,11 +214,11 @@ where
         Ok(())
     }
 
-    fn root(&mut self) -> Result<BTNode<K, V>> {
+    pub fn root(&mut self) -> Result<BTNode<K, V>> {
         self.load_node(self.root_page_nr)
     }
 
-    fn load_node(&mut self, page_nr: u64) -> Result<BTNode<K, V>> {
+    pub fn load_node(&mut self, page_nr: u64) -> Result<BTNode<K, V>> {
         if self.fh.is_none() {
             self.fh = Some(OpenOptions::new().read(true).write(true).create(true).open(db_path(&self.directory))?);
         }
@@ -250,6 +258,126 @@ where
     fn drop(&mut self) {
         if self.len() > 0 {
             self.store_meta().unwrap()
+        }
+    }
+}
+
+
+pub struct BTreeIterator<'a, K, V>
+where
+    K: Debug + Default + Clone + Copy + Ord + Serialize + DeserializeOwned,
+    V: Debug + Default + Copy + Serialize + DeserializeOwned,
+{
+    btree: &'a mut BTree<K, V>,
+    next_node: Option<PagePtr>,
+    current_iterator: std::vec::IntoIter<K>,
+}
+
+
+impl<'a, K, V> BTreeIterator<'a, K, V>
+where
+    K: Debug + Default + Clone + Copy + Ord + Serialize + DeserializeOwned,
+    V: Debug + Default + Copy + Serialize + DeserializeOwned,
+{
+
+    fn new(btree: &'a mut BTree<K, V>) -> Result<Self> {
+        let current_node = match btree.load_node(0)? {
+            BTNode::Internal(_) => panic!("Programming error: page 0 should not be Interal"),
+            BTNode::Leaf(node) => node,
+        };
+        let next_node = current_node.next();
+        let keys: Vec<K> = current_node.keys().collect();
+        let current_iterator = keys.into_iter();
+        Ok(Self { btree, next_node, current_iterator })
+    }
+
+}
+
+
+impl<'a, K, V> Iterator for BTreeIterator<'a, K, V>
+where
+    K: Debug + Default + Clone + Copy + Ord + Serialize + DeserializeOwned,
+    V: Debug + Default + Copy + Serialize + DeserializeOwned,
+{
+    type Item = K;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.current_iterator.next() {
+            Some(k) => Some(k),
+            None => {
+                match self.next_node {
+                    Some(page_nr) => {
+                        let node = match self.btree.load_node(page_nr).unwrap() {
+                            BTNode::Internal(_) => panic!("Programming error: page 0 should not be Interal"),
+                            BTNode::Leaf(node) => node,
+                        };
+                        self.next_node = node.next();
+                        self.current_iterator = node.keys().collect::<Vec<K>>().into_iter();
+                        self.current_iterator.next()
+                    },
+                    None => None
+                }
+            }
+        }
+    }
+}
+
+
+pub struct BTreeValueIterator<'a, K, V>
+where
+    K: Debug + Default + Clone + Copy + Ord + Serialize + DeserializeOwned,
+    V: Debug + Default + Copy + Serialize + DeserializeOwned,
+{
+    btree: &'a mut BTree<K, V>,
+    next_node: Option<PagePtr>,
+    current_iterator: std::vec::IntoIter<V>,
+}
+
+
+impl<'a, K, V> BTreeValueIterator<'a, K, V>
+where
+    K: Debug + Default + Clone + Copy + Ord + Serialize + DeserializeOwned,
+    V: Debug + Default + Copy + Serialize + DeserializeOwned,
+{
+
+    fn new(btree: &'a mut BTree<K, V>) -> Result<Self> {
+        let current_node = match btree.load_node(0)? {
+            BTNode::Internal(_) => panic!("Programming error: page 0 should not be Interal"),
+            BTNode::Leaf(node) => node,
+        };
+        let next_node = current_node.next();
+        let values: Vec<V> = current_node.values().collect();
+        let current_iterator = values.into_iter();
+        Ok(Self { btree, next_node, current_iterator })
+    }
+
+}
+
+
+impl<'a, K, V> Iterator for BTreeValueIterator<'a, K, V>
+where
+    K: Debug + Default + Clone + Copy + Ord + Serialize + DeserializeOwned,
+    V: Debug + Default + Copy + Serialize + DeserializeOwned,
+{
+    type Item = V;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.current_iterator.next() {
+            Some(k) => Some(k),
+            None => {
+                match self.next_node {
+                    Some(page_nr) => {
+                        let node = match self.btree.load_node(page_nr).unwrap() {
+                            BTNode::Internal(_) => panic!("Programming error: page 0 should not be Interal"),
+                            BTNode::Leaf(node) => node,
+                        };
+                        self.next_node = node.next();
+                        self.current_iterator = node.values().collect::<Vec<V>>().into_iter();
+                        self.current_iterator.next()
+                    },
+                    None => None
+                }
+            }
         }
     }
 }

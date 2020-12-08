@@ -15,7 +15,7 @@ use std::{
 };
 
 
-type PagePtr = u64;
+pub type PagePtr = u64;
 
 
 #[derive(Debug)]
@@ -85,7 +85,7 @@ where
     // [v0, v1, v2, v3] -> [v0, v1] | [v2, v3]
     fn split(&mut self, page_nr: u64, split_at: usize) -> (K, Self) {
         let split_key = self.keys[split_at];
-        let node = Self::new(page_nr, &self.keys[split_at..], &self.entries[split_at..], None);
+        let node = Self::new(page_nr, &self.keys[split_at..], &self.entries[split_at..], self.next);
         self.next = Some(page_nr);
         self.keys.drain(split_at..);
         self.entries.drain(split_at..);
@@ -113,7 +113,29 @@ where
         };
         Ok(node)
     }
+
+    pub fn keys(self) -> std::vec::IntoIter<K> {
+        self.keys.into_iter()
+    }
+
+    pub fn values(self) -> std::vec::IntoIter<V> {
+        self.entries.into_iter()
+    }
+
+    pub fn next(&self) -> Option<PagePtr> {
+        self.next
+    }
 }
+
+
+// impl<K, V> IntoIterator for Leaf<K, V> {
+//     type Item = K;
+//     type IntoIter = std::vec::IntoIter<Self::Item>;
+//
+//     fn into_iter(self) -> Self::IntoIter {
+//         self.keys.into_iter()
+//     }
+// }
 
 
 #[derive(Debug)]
@@ -207,6 +229,11 @@ where
         let node = Self { page_nr, keys: bincode::deserialize_from(fh)?, entries: bincode::deserialize_from(fh)? };
         Ok(node)
     }
+
+    pub fn keys(self) -> std::vec::IntoIter<K> {
+        self.keys.into_iter()
+    }
+
 }
 
 
@@ -278,4 +305,12 @@ where
             _ => Err(Error::InvalidFileFormat),
         }
     }
+
+    pub fn keys(self) -> std::vec::IntoIter<K> {
+        match self {
+            Self::Internal(node) => node.keys(),
+            Self::Leaf(node) => node.keys(),
+        }
+    }
+
 }
