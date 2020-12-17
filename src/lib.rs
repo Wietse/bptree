@@ -20,6 +20,7 @@ use std::{
 
 const PAGE_SIZE: u64 = 4096;
 const MAGIC_HEADER: &str = "%bptree%";
+static mut OVERRIDE_MAX_KEY_COUNT: u64 = 0;
 
 
 // Computing n (the number of search keys in a node):
@@ -56,12 +57,16 @@ const MAGIC_HEADER: &str = "%bptree%";
 //          n <= (PAGE_SIZE - SIZE_V - 17) / (SIZE_K + SIZE_V)
 
 fn max_key_count(size_key: u64, size_value: u64) -> u64 {
-    (PAGE_SIZE - size_value - 17) / (size_key + size_value)
+    if unsafe { OVERRIDE_MAX_KEY_COUNT > 0 } {
+        unsafe { OVERRIDE_MAX_KEY_COUNT }
+    } else {
+        (PAGE_SIZE - size_value - 17) / (size_key + size_value)
+    }
 }
 
 
-fn split_at(size_key: u64, size_value: u64) -> usize {
-    let max_key_count = max_key_count(size_key, size_value);
+fn split_at(max_key_count: u64) -> usize {
+    // let max_key_count = max_key_count(size_key, size_value);
     ((max_key_count / 2) + (max_key_count % 2)) as usize
 }
 
@@ -91,7 +96,8 @@ where
     pub directory: PathBuf,
     node_count: u64,
     entry_count: u64,
-    root_page_nr: u64,
+    root_page_nr: PagePtr,
+    emtpy_pages: Vec<PagePtr>,
     key_size: u64,
     value_size: u64,
     key_type: PhantomData<K>,
@@ -108,12 +114,12 @@ where
     K: Debug + Default + Clone + Copy + Ord + Serialize + DeserializeOwned,
     V: Debug + Default + Copy + Serialize + DeserializeOwned,
 {
-    pub fn open<P: AsRef<Path>>(directory: P) -> Result<Self> {
+    pub fn open<P: AsRef<Path>>(directory: P, override_max_key_count: Option<u64>) -> Result<Self> {
         fs::create_dir_all(&directory)?;
         let meta_path = meta_file_path(directory.as_ref());
         match &meta_path.exists() {
             true => Self::load_meta(&meta_path, directory.as_ref()),
-            false => Ok(Self::new(directory.as_ref())),
+            false => Ok(Self::new(directory.as_ref(), override_max_key_count)),
         }
     }
 
@@ -142,7 +148,7 @@ where
         }
     }
 
-    pub fn insert(&mut self, key: K, value: V) -> Result<Option<V>> {
+    pub fn set(&mut self, key: K, value: V) -> Result<Option<V>> {
         if self.len() == 0 {
             self.create_first_root(key, value)?;
             return Ok(None);
@@ -158,11 +164,26 @@ where
         Ok(original_value)
     }
 
+    pub fn remove(&mut self, key: K) -> Result<Option<V>> {
+        match self.len() > 0 {
+            true => {
+                let root = self.load_node(self.root_page_nr)?;
+                let original_value = root.remove(self, key)?;
+                if original_value.is_some() {
+                    self.entry_count -= 1;
+                }
+                Ok(original_value)
+            },
+            false => Ok(None),
+        }
+    }
+
     fn create_first_root(&mut self, key: K, value: V) -> Result<()> {
-        self.root_page_nr = self.next_page_nr();
-        let root = BTNode::new_leaf(self.root_page_nr, &[key], &[value], None);
+        // FIXME: remove this line by eliminating function "root"
+        self.node_count = 0;
+        let root = self.root()?;
+        root.set(self, key, value)?;
         self.entry_count += 1;
-        self.store_node(&root)?;
         Ok(())
     }
 
@@ -180,17 +201,26 @@ where
         page_nr
     }
 
-    fn new(directory: &Path) -> Self {
+    fn on_page_deleted(&mut self, page_nr: PagePtr) {
+        self.emtpy_pages.push(page_nr);
+        self.node_count -= 1;
+    }
+
+    fn new(directory: &Path, override_max_key_count: Option<u64>) -> Self {
         let key_size = mem::size_of::<K>() as u64;
         let value_size = mem::size_of::<V>() as u64;
-        let max_key_count = max_key_count(key_size, value_size);
-        let split_at = split_at(key_size, value_size);
+        let max_key_count = match override_max_key_count {
+            None => max_key_count(key_size, value_size),
+            Some(n) => n,
+        };
+        let split_at = split_at(max_key_count);
         Self {
             magic_header: String::from(MAGIC_HEADER),
             directory: PathBuf::from(directory),
             node_count: 0,
             entry_count: 0,
             root_page_nr: 0,
+            emtpy_pages: vec![],
             key_size,
             value_size,
             max_key_count,
@@ -215,12 +245,19 @@ where
     }
 
     pub fn root(&mut self) -> Result<BTNode<K, V>> {
-        self.load_node(self.root_page_nr)
+        self.load_node(self.root_page_nr).or_else(|err| {
+            // FIXME: better error checking here?
+            self.root_page_nr = self.next_page_nr();
+            Ok(BTNode::new_leaf(self.root_page_nr, &[], &[], None))
+        })
     }
 
     pub fn load_node(&mut self, page_nr: u64) -> Result<BTNode<K, V>> {
         if self.fh.is_none() {
             self.fh = Some(OpenOptions::new().read(true).write(true).create(true).open(db_path(&self.directory))?);
+        }
+        if self.emtpy_pages.contains(&page_nr) {
+            panic!("Page {:?} requested, but it has been deleted", page_nr);
         }
         let fh = self.fh.as_mut().ok_or(Error::InvalidFileHandle)?;
         let offset = PAGE_SIZE * page_nr;
@@ -380,4 +417,35 @@ where
             }
         }
     }
+}
+
+
+#[cfg(test)]
+mod tests {
+    // Note this useful idiom: importing names from outer (for mod tests) scope.
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_len() -> Result<()> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let bt: BTree<u128, u128> = BTree::open(temp_dir.path(), None)?;
+        assert_eq!(bt.len(), 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_root() -> Result<()> {
+        unsafe { OVERRIDE_MAX_KEY_COUNT = 4; }
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let mut bt: BTree<u128, u128> = BTree::open(temp_dir.path(), Some(4))?;
+        println!("{:?}", bt);
+        let root = bt.root()?;
+        assert_eq!(root.page_nr(), 0);
+        assert_eq!(root.len(), 0);
+
+        Ok(())
+    }
+
 }

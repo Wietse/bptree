@@ -3,7 +3,7 @@
 #![allow(unused_imports)]
 
 use crate::error::{Error, Result};
-use crate::BTree;
+use crate::{BTree, OVERRIDE_MAX_KEY_COUNT};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     fmt::Debug,
@@ -32,15 +32,6 @@ where
     K: Debug + Default + Clone + Copy + Ord + Serialize + DeserializeOwned,
     V: Debug + Default + Clone + Copy + Serialize + DeserializeOwned,
 {
-    fn new(page_nr: u64, keys: &[K], entries: &[V], next: Option<PagePtr>) -> Self {
-        // let padding = (size - 2 * order * (mem::size_of::<K>() + mem::size_of::<V>()) - mem::size_of::<PagePtr>()) as u64;
-        Leaf { page_nr, keys: keys.to_vec(), entries: entries.to_vec(), next }
-    }
-
-    fn is_full(&self, max_key_count: u64) -> bool {
-        self.keys.len() >= max_key_count as usize
-    }
-
     pub fn get(&self, key: &K) -> Option<V> {
         match self.keys.binary_search(key) {
             Ok(i) => Some(self.entries[i]),
@@ -78,6 +69,81 @@ where
                 }
             },
         }
+    }
+
+    fn rem(mut self, btree: &mut BTree<K, V>, key: K, parent: Option<&mut Internal<K>>, path_info: Option<&ChildNodeInfo>) -> Result<(Option<V>, Option<PagePtr>)> {
+        match self.keys.binary_search(&key) {
+            Err(_) => Ok((None, None)),
+            Ok(i) => {
+                self.keys.remove(i);
+                let original_value = Some(self.entries.remove(i));
+                let mut deleted_page = None;
+                if self.keys.len() < btree.split_at as usize && parent.is_some() { // else this is the root node => nothing more to dead_code
+                    let parent = parent.unwrap();
+                    let path_info = path_info.unwrap();
+                    let mut done = false;
+                    if path_info.lsibling.is_some() {
+                        // try to transfer a key/value pair from left sibling
+                        let mut node = btree.load_node(path_info.lsibling.unwrap())?.leaf_node();
+                        if node.keys.len() > btree.split_at as usize {
+                            let k = node.keys.pop().unwrap();
+                            let v = node.entries.pop().unwrap();
+                            self.keys.insert(0, k);
+                            self.entries.insert(0, v);
+                            parent.keys[path_info.rparent.unwrap()] = k;
+                            btree.store_node(&BTNode::Leaf(node))?;
+                            done = true;
+                        }
+                    }
+                    if !done && path_info.rsibling.is_some() {
+                        // try to transfer a key/value pair from right sibling
+                        let mut node = btree.load_node(path_info.rsibling.unwrap())?.leaf_node();
+                        if node.keys.len() > btree.split_at as usize {
+                            let k = node.keys.remove(0);
+                            let v = node.entries.remove(0);
+                            self.keys.push(k);
+                            self.entries.push(v);
+                            parent.keys[path_info.lparent.unwrap()] = node.keys[0];
+                            btree.store_node(&BTNode::Leaf(node))?;
+                            done = true;
+                        }
+                    }
+                    if !done {
+                        if path_info.lsibling.is_some() {
+                            // merge this node into the left sibling
+                            let mut node = btree.load_node(path_info.lsibling.unwrap())?.leaf_node();
+                            node.keys.extend(&self.keys);
+                            node.entries.extend(&self.entries);
+                            node.next = self.next;
+                            btree.on_page_deleted(self.page_nr);
+                            deleted_page = Some(self.page_nr);
+                            self = node;
+                        } else {
+                            // merge the right sibling into this node
+                            assert!(path_info.rsibling.is_some());
+                            assert_eq!(path_info.rsibling, self.next);
+                            let right_node = btree.load_node(path_info.rsibling.unwrap())?.leaf_node();
+                            self.keys.extend(right_node.keys);
+                            self.entries.extend(right_node.entries);
+                            self.next = right_node.next;
+                            btree.on_page_deleted(right_node.page_nr);
+                            deleted_page = Some(right_node.page_nr);
+                        }
+                    }
+                }
+                btree.store_node(&BTNode::Leaf(self))?;
+                Ok((original_value, deleted_page))
+            }
+        }
+    }
+
+    fn new(page_nr: u64, keys: &[K], entries: &[V], next: Option<PagePtr>) -> Self {
+        // let padding = (size - 2 * order * (mem::size_of::<K>() + mem::size_of::<V>()) - mem::size_of::<PagePtr>()) as u64;
+        Leaf { page_nr, keys: keys.to_vec(), entries: entries.to_vec(), next }
+    }
+
+    fn is_full(&self, max_key_count: u64) -> bool {
+        self.keys.len() >= max_key_count as usize
     }
 
     // keys and entries have same length
@@ -146,37 +212,25 @@ pub struct Internal<K> {
 }
 
 
+#[derive(Debug)]
+struct ChildNodeInfo {
+    page_nr: PagePtr,
+    lparent: Option<usize>,     // LeftSubtree(keys[lparent]) == page_nr
+    rparent: Option<usize>,     // RightSubtree(keys[rparent]) == page_nr
+    lsibling: Option<PagePtr>,
+    rsibling: Option<PagePtr>,
+}
+
+
 impl<K> Internal<K>
 where
     K: Debug + Default + Clone + Copy + Ord + Serialize + DeserializeOwned,
 {
-    fn new(page_nr: u64, keys: &[K], entries: &[PagePtr]) -> Self {
-        // let padding = (size - 2 * order * (mem::size_of::<K>() + mem::size_of::<PagePtr>()) - mem::size_of::<PagePtr>()) as u64;
-        Internal { page_nr, keys: keys.to_vec(), entries: entries.to_vec() }
-    }
-
-    fn is_full(&self, max_key_count: u64) -> bool {
-        self.keys.len() >= max_key_count as usize
-    }
-
     pub fn get(&self, key: &K) -> PagePtr {
         match self.keys.binary_search(key) {
             Ok(i) => self.entries[i + 1], // keys[i] == key -> right subtree
             Err(i) => self.entries[i],    // keys[i] > key -> left subtree
         }
-    }
-
-    // entries has 1 more value then keys
-    // take the middle key out, but leave its entry!
-    // [k0, k1, k2, k3] -> [k0, k1] | [k3]  split_key == k2
-    // [r0, r1, r2, r3, r4] -> [r0, r1, r2] | [r3, r4]
-    fn split(&mut self, page_nr: u64, split_at: usize) -> (K, Self) {
-        let split_key = self.keys[split_at];
-        let node: Internal<K>;
-        node = Internal::new(page_nr, &self.keys[split_at + 1..], &self.entries[split_at + 1..]);
-        self.keys.drain(split_at..);
-        self.entries.drain(split_at + 1..);
-        (split_key, node)
     }
 
     pub fn set<V>(mut self, btree: &mut BTree<K, V>, key: K, value: V) -> Result<(Option<(K, PagePtr)>, Option<V>)>
@@ -195,9 +249,10 @@ where
                     true => {
                         let (split_key, mut new_node) = self.split(btree.next_page_nr(), btree.split_at);
                         let split_page_nr = new_node.page_nr;
-                        match i < btree.split_at {
+                        match i < btree.split_at  {
                             true => self.insert(i, key, page_nr),
-                            false => new_node.insert(i - btree.split_at, key, page_nr),
+                            // minus 1 because we're taking the split_key out!
+                            false => new_node.insert(i - btree.split_at - 1, key, page_nr),
                         }
                         btree.store_node(&BTNode::Internal(self))?;
                         btree.store_node(&BTNode::Internal(new_node))?;
@@ -212,6 +267,191 @@ where
                 Ok(_) => panic!("Programming error: key should not be present!"),
             },
         }
+    }
+
+    fn get_index_with_siblings(&self, key: &K) -> (K, bool, usize, usize, Option<usize>, Option<usize>) {
+        let (parent_key, is_right_subtree, key_index, next_index) = match self.keys.binary_search(key) {
+            Ok(i) => (self.keys[i], true, i, i + 1), // keys[i] == key -> right subtree
+            Err(i) => {
+                let k = if i > 0 {
+                    self.keys[i - 1]
+                } else {
+                    self.keys[i]
+                };
+                (k, false, i, i)
+            },    // keys[i] > key -> left subtree
+        };
+        let left_sibling = if next_index > 0 { Some(next_index - 1) } else { None };
+        let right_sibling = if self.entries.len() > next_index + 1 { Some(next_index + 1) } else { None };
+        (parent_key, is_right_subtree, key_index, next_index, left_sibling, right_sibling)
+    }
+
+    fn get_child_node_info(&self, key: &K) -> ChildNodeInfo {
+        match self.keys.binary_search(key) {
+            Ok(i) => {
+                // exact match -> right subtree
+                ChildNodeInfo {
+                    page_nr: self.entries[i + 1],
+                    lparent: if i < self.keys.len() - 1 { Some(i + 1) } else { None },
+                    rparent: Some(i),
+                    lsibling: Some(self.entries[i]),
+                    rsibling: if i < self.entries.len() - 2 { Some(self.entries[i + 2]) } else { None },
+                }
+            },
+            Err(i) => {
+                // not found: keys(i) > key -> left subtree
+                ChildNodeInfo {
+                    page_nr: self.entries[i],
+                    lparent: Some(i),
+                    rparent: if i > 0 { Some(i - 1) } else { None },
+                    lsibling: if i > 0 { Some(self.entries[i - 1]) } else { None },
+                    rsibling: if i < self.entries.len() - 1 { Some(self.entries[i + 1]) } else { None },
+                }
+            },
+        }
+    }
+
+    fn rem<V>(mut self, btree: &mut BTree<K, V>, key: K, parent: Option<&mut Internal<K>>, path_info: Option<&ChildNodeInfo>) -> Result<(Option<V>, Option<PagePtr>)>
+    where
+        V: Debug + Default + Clone + Copy + Serialize + DeserializeOwned,
+    {
+        let child_info = self.get_child_node_info(&key);
+        let (original_value, deleted_page) = match btree.load_node(child_info.page_nr)? {
+            BTNode::Internal(node) => node.rem(btree, key, Some(&mut self), Some(&child_info))?,
+            BTNode::Leaf(node) => node.rem(btree, key, Some(&mut self), Some(&child_info))?,
+        };
+
+        let result = match deleted_page {
+            None => Ok((original_value, None)),
+            Some(page_nr) => {
+                let deleted_page = self.remove_page(btree, page_nr, parent, path_info)?;
+                Ok((original_value, deleted_page))
+            }
+        };
+        btree.store_node(&BTNode::Internal(self))?;
+        result
+    }
+
+    fn remove_page<V>(&mut self, btree: &mut BTree<K, V>, page_nr: PagePtr, parent: Option<&mut Internal<K>>, path_info: Option<&ChildNodeInfo>) -> Result<Option<PagePtr>>
+    where
+        V: Debug + Default + Clone + Copy + Serialize + DeserializeOwned,
+    {
+        match self.entries.binary_search(&page_nr) {
+            Err(_) => panic!("Programming error: deleted page should be present!"),
+            Ok(i) => {
+                let removed_key = self.keys.remove(i - 1);
+                self.entries.remove(i);
+
+                let deleted_page = match parent {
+                    None => { // This is the root node!
+                        if self.keys.len() == 0 {
+                            // We're at the root and it's last key has just been removed
+                            let new_root_page_nr = self.entries[0];
+                            match btree.load_node(new_root_page_nr)? {
+                                BTNode::Leaf(_) => {},  // it's a Leaf: nothing more to do!
+                                BTNode::Internal(new_root) => {
+                                    match new_root.keys.binary_search(&removed_key) {
+                                        Ok(_) => {},  // panic!("Key {:?} not expected to be present\nself: {:?}\nnew_root: {:?}", removed_key, self, new_root),
+                                        Err(i) => {
+                                            // new_root.keys.insert(i, removed_key);
+                                            // btree.store_node(&BTNode::Internal(new_root))?;
+                                            panic!("Key {:?} expected to be present\nself: {:?}\nnew_root: {:?}", removed_key, self, new_root);
+                                        }
+                                    }
+                                },
+                            }
+                            btree.root_page_nr = new_root_page_nr;
+                            btree.on_page_deleted(self.page_nr);
+                            Some(self.page_nr)
+                        } else {
+                            None
+                        }
+                    },
+
+                    Some(parent) => { 
+                        let mut deleted_page = None;
+                        if self.keys.len() < btree.split_at as usize {
+                            let path_info = path_info.unwrap();
+                            let mut done = false;
+                            if path_info.lsibling.is_some() {
+                                // try to transfer a key/value pair from left sibling
+                                let mut node = btree.load_node(path_info.lsibling.unwrap())?.internal_node();
+                                if node.keys.len() > btree.split_at as usize {
+                                    let k = node.keys.pop().unwrap();
+                                    let v = node.entries.pop().unwrap();
+                                    self.keys.insert(0, k);
+                                    self.entries.insert(0, v);
+                                    parent.keys[path_info.rparent.unwrap()] = k;
+                                    btree.store_node(&BTNode::Internal(node))?;
+                                    done = true;
+                                }
+                            }
+
+                            if !done && path_info.rsibling.is_some() {
+                                // try to transfer a key/value pair from right sibling
+                                let mut node = btree.load_node(path_info.rsibling.unwrap())?.internal_node();
+                                if node.keys.len() > btree.split_at {
+                                    let k = node.keys.remove(0);
+                                    let v = node.entries.remove(0);
+                                    self.keys.push(k);
+                                    self.entries.push(v);
+                                    parent.keys[path_info.lparent.unwrap()] = node.keys[0];
+                                    btree.store_node(&BTNode::Internal(node))?;
+                                    done = true;
+                                }
+                            }
+
+                            if !done {
+                                if path_info.lsibling.is_some() {
+                                    // merge this node into the left sibling
+                                    let mut node = btree.load_node(path_info.lsibling.unwrap())?.internal_node();
+                                    node.keys.push(parent.keys[path_info.rparent.unwrap()]);
+                                    node.keys.extend(&self.keys);
+                                    node.entries.extend(&self.entries);
+                                    btree.on_page_deleted(self.page_nr);
+                                    deleted_page = Some(self.page_nr);
+                                    *self = node;
+                                } else if path_info.rsibling.is_some() {
+                                    // merge the right sibling into this node
+                                    // we only get here if "self" if the first leaf of the BTree
+                                    let node = btree.load_node(path_info.rsibling.unwrap())?.internal_node();
+                                    self.keys.push(parent.keys[path_info.lparent.unwrap()]);
+                                    self.keys.extend(node.keys);
+                                    self.entries.extend(node.entries);
+                                    btree.on_page_deleted(node.page_nr);
+                                    deleted_page = Some(node.page_nr);
+                                }
+                            }
+
+                        }
+                        deleted_page
+                    },
+                };
+                Ok(deleted_page)
+            }
+        }
+    }
+
+    fn new(page_nr: u64, keys: &[K], entries: &[PagePtr]) -> Self {
+        // let padding = (size - 2 * order * (mem::size_of::<K>() + mem::size_of::<PagePtr>()) - mem::size_of::<PagePtr>()) as u64;
+        Internal { page_nr, keys: keys.to_vec(), entries: entries.to_vec() }
+    }
+
+    fn is_full(&self, max_key_count: u64) -> bool {
+        self.keys.len() >= max_key_count as usize
+    }
+
+    // entries has 1 more value then keys
+    // take the middle key out, but leave its entry!
+    // [k0, k1, k2, k3] -> [k0, k1] | [k3]  split_key == k2
+    // [r0, r1, r2, r3, r4] -> [r0, r1, r2] | [r3, r4]
+    fn split(&mut self, page_nr: u64, split_at: usize) -> (K, Self) {
+        let split_key = self.keys[split_at];
+        let node: Internal<K>;
+        node = Internal::new(page_nr, &self.keys[split_at + 1..], &self.entries[split_at + 1..]);
+        self.keys.drain(split_at..);
+        self.entries.drain(split_at + 1..);
+        (split_key, node)
     }
 
     fn insert(&mut self, i: usize, key: K, value: PagePtr) {
@@ -257,16 +497,21 @@ where
         BTNode::Internal(Internal::new(page_nr, keys, entries))
     }
 
-    pub fn set(self, btree: &mut BTree<K, V>, key: K, value: V) -> Result<(Option<(K, PagePtr)>, Option<V>)>
-    where
-        V: Debug + Clone + Copy + Serialize + DeserializeOwned,
-    {
+    pub fn set(self, btree: &mut BTree<K, V>, key: K, value: V) -> Result<(Option<(K, PagePtr)>, Option<V>)> {
         // "self" is the root page!
-        let page_nr = self.page_nr();
         match self {
             BTNode::Internal(node) => node.set(btree, key, value),
             BTNode::Leaf(node) => node.set(btree, key, value),
         }
+    }
+
+    pub fn remove(self, btree: &mut BTree<K, V>, key: K) -> Result<Option<V>> {
+        // "self" is the root page!
+        let (original_value, deleted_page) = match self {
+            BTNode::Internal(node) => node.rem(btree, key, None, None)?,
+            BTNode::Leaf(node) => node.rem(btree, key, None, None)?,
+        };
+        Ok(original_value)
     }
 
     pub fn page_nr(&self) -> u64 {
@@ -306,11 +551,354 @@ where
         }
     }
 
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Internal(node) => node.keys.len(),
+            Self::Leaf(node) => node.keys.len(),
+        }
+    }
+
     pub fn keys(self) -> std::vec::IntoIter<K> {
         match self {
             Self::Internal(node) => node.keys(),
             Self::Leaf(node) => node.keys(),
         }
+    }
+
+    pub fn dump(&self, btree: &mut BTree<K, V>) -> Result<()> {
+        // This is the root node
+        match self {
+            Self::Internal(node) => {
+                let mut all_nodes = vec![node.page_nr];
+                let mut start = 0;
+                let mut end = 1;
+                let mut count = 0;
+                loop {
+                    for i in start..end {
+                        let node = btree.load_node(all_nodes[i])?.internal_node();
+                        for page_nr in node.entries {
+                            match btree.load_node(page_nr)? {
+                                Self::Internal(_) => {
+                                    count += 1;
+                                    all_nodes.push(page_nr);
+                                },
+                                Self::Leaf(_) => {
+                                    break;
+                                }
+                            }
+                        }
+                        if count == 0 { break; }
+                    }
+                    if count > 0 {
+                        start = end;
+                        end += count;
+                        count = 0;
+                    } else {
+                        break;
+                    }
+                }
+                for page_nr in all_nodes {
+                    println!("{:?}", btree.load_node(page_nr)?);
+                }
+                self.dump_leafs(btree)?;
+            },
+            Self::Leaf(node) => println!("{:?}", node),
+        }
+
+        Ok(())
+    }
+
+    pub fn dump_leafs(&self, btree: &mut BTree<K, V>) -> Result<()> {
+        let mut page_nr = Some(0);
+        while page_nr.is_some() {
+            let node = btree.load_node(page_nr.unwrap())?.leaf_node();
+            println!("{:?}", node);
+            page_nr = node.next;
+        }
+        Ok(())
+    }
+
+    fn leaf_node(self) -> Leaf<K, V> {
+        match self {
+            BTNode::Internal(_) => panic!("Expected a leaf node, got an Internal"),
+            BTNode::Leaf(node) => node,
+        }
+    }
+
+    fn internal_node(self) -> Internal<K> {
+        match self {
+            BTNode::Leaf(_) => panic!("Expected an internal node, got a Leaf"),
+            BTNode::Internal(node) => node,
+        }
+    }
+
+}
+
+
+#[cfg(test)]
+mod tests {
+    // Note this useful idiom: importing names from outer (for mod tests) scope.
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_set() -> Result<()> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let mut bt: BTree<u128, u128> = BTree::open(temp_dir.path(), Some(4))?;
+
+        // println!("{:?}", bt);
+
+        let root = bt.root()?;
+        assert_eq!(root.len(), 0);
+
+
+        // Fill the first leaf
+        for i in 1..=4 {
+            bt.set(i, i*10)?;
+        }
+        assert_eq!(bt.root()?.len(), 4);
+
+        // First leaf will be split
+        bt.set(5, 50)?;
+        assert_eq!(bt.root()?.len(), 1);
+
+        // Second leaf will be split
+        bt.set(6, 60)?;
+        bt.set(7, 70)?;
+        assert_eq!(bt.root()?.len(), 2);
+
+        // Fill the root
+        for i in 8..=11 {
+            bt.set(i, i*10)?;
+        }
+        assert_eq!(bt.root()?.len(), 4);
+
+        // Root will be split
+        bt.set(12, 120)?;
+        bt.set(13, 130)?;
+        assert_eq!(bt.root()?.len(), 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_remove_mkc_4() -> Result<()> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let mut bt: BTree<u128, u128> = BTree::open(temp_dir.path(), Some(4))?;
+
+        // Fill the BTree
+        // 7 leaf nodes
+        // 2 level 1 internal nodes
+        // 1 root node
+        //
+        //                           [70]
+        //                     ...../    \.....
+        //                    /                \
+        //           [30,  50]                 [90,    110,    130]
+        //          /    /   \                /     /      /       \
+        //         /    /     \              /     /      /         \
+        // [10, 20] [30, 40] [50, 60] [70, 80] [90, 100] [110, 120] [130, 140, 150]
+        //
+        for i in 1..=15 {
+            bt.set(i*10, i*100)?;
+        }
+        dump_btree(&mut bt)?;
+        assert_eq!(bt.node_count, 10);
+        assert_eq!(bt.len(), 15);
+
+        // Remove 120 (from leaf(6) [110, 120])
+        // 130 is transferred from right sibling leaf(9)
+        // key 130 is replaced by 140 in internal(7)
+        //
+        //                           [70]
+        //                     ...../    \.....
+        //                    /                \
+        //           [30,  50]                 [90,    110,    140]
+        //          /    /   \                /     /      /       \
+        //         /    /     \              /     /      /         \
+        // [10, 20] [30, 40] [50, 60] [70, 80] [90, 100] [110, 130] [140, 150]
+        //
+        assert_eq!(bt.remove(120)?, Some(1200));
+        dump_btree(&mut bt)?;
+        assert_eq!(bt.node_count, 10);
+        assert_eq!(bt.len(), 14);
+
+        // Remove 100 (from leaf(5) [90, 100])
+        // leaf(5) is merged into leaf(4)
+        // leaf(5) is deleted
+        // key 90 is removed from internal(7)
+        //
+        //                           [70]
+        //                     ...../    \.........
+        //                    /                    \
+        //           [30,  50]                     [110,  140]
+        //          /    /   \                    /     /    \
+        //         /    /     \                  /     /      \
+        // [10, 20] [30, 40] [50, 60] [70, 80, 90] [110, 130] [140, 150]
+        //
+        assert_eq!(bt.remove(100)?, Some(1000));
+        dump_btree(&mut bt)?;
+        assert_eq!(bt.node_count, 9);
+        assert_eq!(bt.len(), 13);
+
+        // Remove 110 (from leaf(6) [110, 130])
+        // 90 is transferred from left sibling leaf(4)
+        // key 110 is replaced by 90 in internal(7)
+        //
+        //                           [70]
+        //                     ...../    \......
+        //                    /                 \
+        //           [30,  50]                  [90,  140]
+        //          /    /   \                 /    /    \
+        //         /    /     \               /    /      \
+        // [10, 20] [30, 40] [50, 60] [70, 80] [90, 130] [140, 150]
+        //
+        assert_eq!(bt.remove(110)?, Some(1100));
+        dump_btree(&mut bt)?;
+        assert_eq!(bt.node_count, 9);
+        assert_eq!(bt.len(), 12);
+
+        // Remove 30 (from leaf(1) [30, 40])
+        // leaf(1) is merged into leaf(0)
+        // leaf(1) is deleted
+        // key 30 is removed from internal(2)
+        // Now also internal nodes are merged:
+        // internal(7) is merged into internal(2)
+        // This bubbles up to the root:
+        // the root is replaced by internal(2)
+        // key 70 gets inserted into internal(2)
+        //
+        //               [50,    70,     90,    140]
+        //              /      /      /       /    \
+        //             /      /      /       /      \
+        // [10, 20, 40] [50, 60] [70, 80] [90, 130] [140, 150]
+        //
+        assert_eq!(bt.remove(30)?, Some(300));
+        dump_btree(&mut bt)?;
+        assert_eq!(bt.node_count, 6);
+        assert_eq!(bt.len(), 11);
+
+        // Remove 20, 40, 50, 60, 80, 90, 130 and 140 so that the root collapses into 1 leaf(0)
+        for i in [20_u128, 40, 50, 60, 80, 90, 130, 140].iter() {
+            assert_eq!(bt.remove(*i)?, Some(i*10));
+        }
+        dump_btree(&mut bt)?;
+        assert_eq!(bt.node_count, 1);
+        assert_eq!(bt.len(), 3);
+
+        Ok(())
+    }
+
+    fn dump_btree(bt: &mut BTree<u128, u128>) -> Result<()> {
+        println!("==== BTree");
+        println!("{:?}", bt);
+        bt.root()?.dump(bt)?;
+        println!("====");
+        Ok(())
+    }
+
+    #[test]
+    fn test_remove_mkc_5() -> Result<()> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let mut bt: BTree<u128, u128> = BTree::open(temp_dir.path(), Some(5))?;
+
+        // Fill the BTree
+        // 7 leaf nodes
+        // 2 level 1 internal nodes
+        // 1 root node
+        for i in 1..=22 {
+            bt.set(i*10, i*100)?;
+        }
+        dump_btree(&mut bt)?;
+        assert_eq!(bt.node_count, 10);
+        assert_eq!(bt.len(), 22);
+
+        // transfer from right sibling
+        assert_eq!(bt.remove(180)?, Some(1800));
+        dump_btree(&mut bt)?;
+        assert_eq!(bt.node_count, 10);
+        assert_eq!(bt.len(), 21);
+
+        // left merge
+        assert_eq!(bt.remove(100)?, Some(1000));
+        dump_btree(&mut bt)?;
+        assert_eq!(bt.node_count, 7);
+        assert_eq!(bt.len(), 20);
+
+        // transfer from left sibling
+        assert_eq!(bt.remove(110)?, Some(1100));
+        dump_btree(&mut bt)?;
+        assert_eq!(bt.node_count, 7);
+        assert_eq!(bt.len(), 19);
+
+        assert_eq!(bt.remove(30)?, Some(300));
+        dump_btree(&mut bt)?;
+        assert_eq!(bt.node_count, 6);
+        assert_eq!(bt.len(), 18);
+
+        for i in [10, 20_u128, 40, 50, 60, 80, 90, 120, 130, 140, 170, 200, 220].iter() {
+            assert_eq!(bt.remove(*i)?, Some(i*10));
+        }
+        dump_btree(&mut bt)?;
+        assert_eq!(bt.node_count, 1);
+        assert_eq!(bt.len(), 5);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_remove_mkc_3() -> Result<()> {
+        let temp_dir = TempDir::new().expect("unable to create temporary working directory");
+        let mut bt: BTree<u128, u128> = BTree::open(temp_dir.path(), Some(3))?;
+
+        // Fill the BTree
+        // 1 root node
+        // 2 level 1 internal nodes
+        // 5 level 2 internal nodes
+        // 14 leaf nodes
+        for i in 1..=29 {
+            bt.set(i, i*10)?;
+        }
+        dump_btree(&mut bt)?;
+        assert_eq!(bt.node_count, 22);
+        assert_eq!(bt.len(), 29);
+
+        // transfer from right sibling
+        assert_eq!(bt.remove(28)?, Some(280));
+        dump_btree(&mut bt)?;
+        assert_eq!(bt.node_count, 22);
+        assert_eq!(bt.len(), 28);
+
+        // left merge
+        assert_eq!(bt.remove(6)?, Some(60));
+        dump_btree(&mut bt)?;
+        assert_eq!(bt.get(7)?, Some(70));
+        assert_eq!(bt.node_count, 18);
+        assert_eq!(bt.len(), 27);
+
+        // transfer from left sibling
+        assert_eq!(bt.remove(7)?, Some(70));
+        dump_btree(&mut bt)?;
+        assert_eq!(bt.node_count, 18);
+        assert_eq!(bt.len(), 26);
+
+        assert_eq!(bt.remove(5)?, Some(50));
+        assert_eq!(bt.remove(8)?, Some(80));
+        assert_eq!(bt.remove(27)?, Some(270));
+        assert_eq!(bt.remove(29)?, Some(290));
+        dump_btree(&mut bt)?;
+        assert_eq!(bt.node_count, 15);
+        assert_eq!(bt.len(), 22);
+
+        for i in [1, 3, 9, 11, 13, 15, 17, 19, 21, 23, 25].iter() {
+            assert_eq!(bt.remove(*i)?, Some(i*10));
+            assert_eq!(bt.get(*i + 1)?, Some((i+1)*10));
+        }
+        dump_btree(&mut bt)?;
+        assert_eq!(bt.node_count, 6);
+        assert_eq!(bt.len(), 11);
+
+        Ok(())
     }
 
 }
