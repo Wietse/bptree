@@ -3,7 +3,7 @@
 #![allow(unused_imports)]
 
 use crate::error::{Error, Result};
-use crate::{BTree, OVERRIDE_MAX_KEY_COUNT};
+use crate::BTree;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     fmt::Debug,

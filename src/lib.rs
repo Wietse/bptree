@@ -20,7 +20,6 @@ use std::{
 
 const PAGE_SIZE: u64 = 4096;
 const MAGIC_HEADER: &str = "%bptree%";
-static mut OVERRIDE_MAX_KEY_COUNT: u64 = 0;
 
 
 // Computing n (the number of search keys in a node):
@@ -57,16 +56,11 @@ static mut OVERRIDE_MAX_KEY_COUNT: u64 = 0;
 //          n <= (PAGE_SIZE - SIZE_V - 17) / (SIZE_K + SIZE_V)
 
 fn max_key_count(size_key: u64, size_value: u64) -> u64 {
-    if unsafe { OVERRIDE_MAX_KEY_COUNT > 0 } {
-        unsafe { OVERRIDE_MAX_KEY_COUNT }
-    } else {
-        (PAGE_SIZE - size_value - 17) / (size_key + size_value)
-    }
+    (PAGE_SIZE - size_value - 17) / (size_key + size_value)
 }
 
 
 fn split_at(max_key_count: u64) -> usize {
-    // let max_key_count = max_key_count(size_key, size_value);
     ((max_key_count / 2) + (max_key_count % 2)) as usize
 }
 
@@ -437,7 +431,6 @@ mod tests {
 
     #[test]
     fn test_root() -> Result<()> {
-        unsafe { OVERRIDE_MAX_KEY_COUNT = 4; }
         let temp_dir = TempDir::new().expect("unable to create temporary working directory");
         let mut bt: BTree<u128, u128> = BTree::open(temp_dir.path(), Some(4))?;
         println!("{:?}", bt);
