@@ -22,15 +22,15 @@ pub struct Leaf<K, V> {
 
 impl<K, V> Leaf<K, V>
 where
-    K: Debug + Default + Clone + Copy + Ord + Serialize + DeserializeOwned,
-    V: Debug + Default + Clone + Copy + Serialize + DeserializeOwned,
+    K: Debug + Default + Clone + Ord + Serialize + DeserializeOwned,
+    V: Debug + Default + Clone + Serialize + DeserializeOwned,
 {
 
     // Returns the associated value for `key` as `Some(value)` or `None` if it's not present.
     //
     fn get(&self, key: &K) -> Option<V> {
         match self.keys.binary_search(key) {
-            Ok(i) => Some(self.entries[i]),
+            Ok(i) => Some(self.entries[i].clone()),
             Err(_) => None,
         }
     }
@@ -46,7 +46,7 @@ where
     //
     fn set(mut self, btree: &mut BTree<K, V>, key: K, value: V) -> Result<(Option<(K, PagePtr)>, Option<V>)>
     where
-        V: Debug + Clone + Copy + Serialize + DeserializeOwned,
+        V: Debug + Clone + Serialize + DeserializeOwned,
     {
         match self.keys.binary_search(&key) {
             Ok(i) => {
@@ -100,7 +100,7 @@ where
                         if node.keys.len() > btree.split_at as usize {
                             let k = node.keys.pop().unwrap();
                             let v = node.entries.pop().unwrap();
-                            self.keys.insert(0, k);
+                            self.keys.insert(0, k.clone());
                             self.entries.insert(0, v);
                             parent.keys[path_info.rparent.unwrap()] = k;
                             btree.store_node(&BTNode::Leaf(node))?;
@@ -115,7 +115,7 @@ where
                             let v = node.entries.remove(0);
                             self.keys.push(k);
                             self.entries.push(v);
-                            parent.keys[path_info.lparent.unwrap()] = node.keys[0];
+                            parent.keys[path_info.lparent.unwrap()] = node.keys[0].clone();
                             btree.store_node(&BTNode::Leaf(node))?;
                             done = true;
                         }
@@ -124,8 +124,8 @@ where
                         if path_info.lsibling.is_some() {
                             // merge this node into the left sibling
                             let mut node = btree.load_node(path_info.lsibling.unwrap())?.leaf_node();
-                            node.keys.extend(&self.keys);
-                            node.entries.extend(&self.entries);
+                            node.keys.extend(self.keys);
+                            node.entries.extend(self.entries);
                             node.next = self.next;
                             btree.on_page_deleted(self.page_nr);
                             deleted_page = Some(self.page_nr);
@@ -162,7 +162,7 @@ where
     // [k0, k1, k2, k3] -> [k0, k1] | [k2, k3]  split_key == k2
     // [v0, v1, v2, v3] -> [v0, v1] | [v2, v3]
     fn split(&mut self, page_nr: u64, split_at: usize) -> (K, Self) {
-        let split_key = self.keys[split_at];
+        let split_key = self.keys[split_at].clone();
         let node = Self::new(page_nr, &self.keys[split_at..], &self.entries[split_at..], self.next);
         self.next = Some(page_nr);
         self.keys.drain(split_at..);
@@ -236,7 +236,7 @@ struct ChildNodeInfo {
 
 impl<K> Internal<K>
 where
-    K: Debug + Default + Clone + Copy + Ord + Serialize + DeserializeOwned,
+    K: Debug + Default + Clone + Ord + Serialize + DeserializeOwned,
 {
     fn get(&self, key: &K) -> PagePtr {
         match self.keys.binary_search(key) {
@@ -247,7 +247,7 @@ where
 
     fn set<V>(mut self, btree: &mut BTree<K, V>, key: K, value: V) -> Result<(Option<(K, PagePtr)>, Option<V>)>
     where
-        V: Debug + Default + Clone + Copy + Serialize + DeserializeOwned,
+        V: Debug + Default + Clone +  Serialize + DeserializeOwned,
     {
         let next_level_page_nr = self.get(&key);
         let return_value = match btree.load_node(next_level_page_nr)? {
@@ -314,7 +314,7 @@ where
         path_info: Option<&ChildNodeInfo>,
     ) -> Result<(Option<V>, Option<PagePtr>)>
     where
-        V: Debug + Default + Clone + Copy + Serialize + DeserializeOwned,
+        V: Debug + Default + Clone +  Serialize + DeserializeOwned,
     {
         let child_info = self.get_child_node_info(&key);
         let (original_value, deleted_page) = match btree.load_node(child_info.page_nr)? {
@@ -341,7 +341,7 @@ where
         path_info: Option<&ChildNodeInfo>,
     ) -> Result<Option<PagePtr>>
     where
-        V: Debug + Default + Clone + Copy + Serialize + DeserializeOwned,
+        V: Debug + Default + Clone +  Serialize + DeserializeOwned,
     {
         match self.entries.binary_search(&page_nr) {
             Err(_) => panic!("Programming error: deleted page should be present!"),
@@ -375,7 +375,7 @@ where
                                 if node.keys.len() > btree.split_at as usize {
                                     let k = node.keys.pop().unwrap();
                                     let v = node.entries.pop().unwrap();
-                                    self.keys.insert(0, k);
+                                    self.keys.insert(0, k.clone());
                                     self.entries.insert(0, v);
                                     parent.keys[path_info.rparent.unwrap()] = k;
                                     btree.store_node(&BTNode::Internal(node))?;
@@ -391,7 +391,7 @@ where
                                     let v = node.entries.remove(0);
                                     self.keys.push(k);
                                     self.entries.push(v);
-                                    parent.keys[path_info.lparent.unwrap()] = node.keys[0];
+                                    parent.keys[path_info.lparent.unwrap()] = node.keys[0].clone();
                                     btree.store_node(&BTNode::Internal(node))?;
                                     done = true;
                                 }
@@ -401,8 +401,8 @@ where
                                 if path_info.lsibling.is_some() {
                                     // merge this node into the left sibling
                                     let mut node = btree.load_node(path_info.lsibling.unwrap())?.internal_node();
-                                    node.keys.push(parent.keys[path_info.rparent.unwrap()]);
-                                    node.keys.extend(&self.keys);
+                                    node.keys.push(parent.keys[path_info.rparent.unwrap()].clone());
+                                    node.keys.extend(self.keys.iter().map(|k| k.clone()));
                                     node.entries.extend(&self.entries);
                                     btree.on_page_deleted(self.page_nr);
                                     deleted_page = Some(self.page_nr);
@@ -411,7 +411,7 @@ where
                                     // merge the right sibling into this node
                                     // we only get here if "self" if the first leaf of the BTree
                                     let node = btree.load_node(path_info.rsibling.unwrap())?.internal_node();
-                                    self.keys.push(parent.keys[path_info.lparent.unwrap()]);
+                                    self.keys.push(parent.keys[path_info.lparent.unwrap()].clone());
                                     self.keys.extend(node.keys);
                                     self.entries.extend(node.entries);
                                     btree.on_page_deleted(node.page_nr);
@@ -441,7 +441,7 @@ where
     // [k0, k1, k2, k3] -> [k0, k1] | [k3]  split_key == k2
     // [r0, r1, r2, r3, r4] -> [r0, r1, r2] | [r3, r4]
     fn split(&mut self, page_nr: u64, split_at: usize) -> (K, Self) {
-        let split_key = self.keys[split_at];
+        let split_key = self.keys[split_at].clone();
         let node: Internal<K>;
         node = Internal::new(page_nr, &self.keys[split_at + 1..], &self.entries[split_at + 1..]);
         self.keys.drain(split_at..);
@@ -480,8 +480,8 @@ pub enum BTNode<K, V> {
 
 impl<K, V> BTNode<K, V>
 where
-    K: Debug + Default + Clone + Copy + Ord + Serialize + DeserializeOwned,
-    V: Debug + Default + Clone + Copy + Serialize + DeserializeOwned,
+    K: Debug + Default + Clone + Ord + Serialize + DeserializeOwned,
+    V: Debug + Default + Clone + Serialize + DeserializeOwned,
 {
     pub fn new_leaf(page_nr: u64, keys: &[K], entries: &[V], next: Option<PagePtr>) -> Self {
         BTNode::Leaf(Leaf::new(page_nr, keys, entries, next))

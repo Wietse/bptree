@@ -82,8 +82,8 @@ fn db_path(directory: &Path) -> PathBuf {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BTree<K, V>
 where
-    K: Debug + Default + Clone + Copy + Ord + Serialize + DeserializeOwned,
-    V: Debug + Default + Copy + Serialize + DeserializeOwned,
+    K: Debug + Default + Clone + Ord + Serialize + DeserializeOwned,
+    V: Debug + Default + Clone + Serialize + DeserializeOwned,
 {
     magic_header: String,
     #[serde(skip)]
@@ -105,8 +105,8 @@ where
 
 impl<K, V> BTree<K, V>
 where
-    K: Debug + Default + Clone + Copy + Ord + Serialize + DeserializeOwned,
-    V: Debug + Default + Copy + Serialize + DeserializeOwned,
+    K: Debug + Default + Clone + Ord + Serialize + DeserializeOwned,
+    V: Debug + Default + Clone + Serialize + DeserializeOwned,
 {
     pub fn open<P: AsRef<Path>>(directory: P, override_max_key_count: Option<u64>) -> Result<Self> {
         fs::create_dir_all(&directory)?;
@@ -275,8 +275,8 @@ where
 // Make sure the meta data for the BTree is written to disk
 impl<K, V> Drop for BTree<K, V>
 where
-    K: Debug + Default + Clone + Copy + Ord + Serialize + DeserializeOwned,
-    V: Debug + Default + Copy + Serialize + DeserializeOwned,
+    K: Debug + Default + Clone + Ord + Serialize + DeserializeOwned,
+    V: Debug + Default + Clone + Serialize + DeserializeOwned,
 {
     fn drop(&mut self) {
         if self.len() > 0 {
@@ -288,8 +288,8 @@ where
 
 pub struct BTreeIterator<'a, K, V>
 where
-    K: Debug + Default + Clone + Copy + Ord + Serialize + DeserializeOwned,
-    V: Debug + Default + Copy + Serialize + DeserializeOwned,
+    K: Debug + Default + Clone + Ord + Serialize + DeserializeOwned,
+    V: Debug + Default + Clone + Serialize + DeserializeOwned,
 {
     btree: &'a mut BTree<K, V>,
     next_node: Option<PagePtr>,
@@ -299,8 +299,8 @@ where
 
 impl<'a, K, V> BTreeIterator<'a, K, V>
 where
-    K: Debug + Default + Clone + Copy + Ord + Serialize + DeserializeOwned,
-    V: Debug + Default + Copy + Serialize + DeserializeOwned,
+    K: Debug + Default + Clone + Ord + Serialize + DeserializeOwned,
+    V: Debug + Default + Clone +  Serialize + DeserializeOwned,
 {
 
     fn new(btree: &'a mut BTree<K, V>) -> Result<Self> {
@@ -319,8 +319,8 @@ where
 
 impl<'a, K, V> Iterator for BTreeIterator<'a, K, V>
 where
-    K: Debug + Default + Clone + Copy + Ord + Serialize + DeserializeOwned,
-    V: Debug + Default + Copy + Serialize + DeserializeOwned,
+    K: Debug + Default + Clone + Ord + Serialize + DeserializeOwned,
+    V: Debug + Default + Clone + Serialize + DeserializeOwned,
 {
     type Item = K;
 
@@ -348,8 +348,8 @@ where
 
 pub struct BTreeValueIterator<'a, K, V>
 where
-    K: Debug + Default + Clone + Copy + Ord + Serialize + DeserializeOwned,
-    V: Debug + Default + Copy + Serialize + DeserializeOwned,
+    K: Debug + Default + Clone + Ord + Serialize + DeserializeOwned,
+    V: Debug + Default + Clone + Serialize + DeserializeOwned,
 {
     btree: &'a mut BTree<K, V>,
     next_node: Option<PagePtr>,
@@ -359,8 +359,8 @@ where
 
 impl<'a, K, V> BTreeValueIterator<'a, K, V>
 where
-    K: Debug + Default + Clone + Copy + Ord + Serialize + DeserializeOwned,
-    V: Debug + Default + Copy + Serialize + DeserializeOwned,
+    K: Debug + Default + Clone + Ord + Serialize + DeserializeOwned,
+    V: Debug + Default + Clone + Serialize + DeserializeOwned,
 {
 
     fn new(btree: &'a mut BTree<K, V>) -> Result<Self> {
@@ -379,8 +379,8 @@ where
 
 impl<'a, K, V> Iterator for BTreeValueIterator<'a, K, V>
 where
-    K: Debug + Default + Clone + Copy + Ord + Serialize + DeserializeOwned,
-    V: Debug + Default + Copy + Serialize + DeserializeOwned,
+    K: Debug + Default + Clone + Ord + Serialize + DeserializeOwned,
+    V: Debug + Default + Clone + Serialize + DeserializeOwned,
 {
     type Item = V;
 
