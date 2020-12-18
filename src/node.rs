@@ -1,18 +1,11 @@
-#![allow(dead_code)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
+// #![allow(dead_code)]
+// #![allow(unused_variables)]
+// #![allow(unused_imports)]
 
 use crate::error::{Error, Result};
 use crate::BTree;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::{
-    fmt::Debug,
-    fs::{self, File, OpenOptions},
-    io::{self, Read, Seek, SeekFrom, Write},
-    marker::PhantomData,
-    mem,
-    path::{Path, PathBuf},
-};
+use serde::{de::DeserializeOwned, Serialize};
+use std::{fmt::Debug, fs::File, io::Read, mem};
 
 
 pub type PagePtr = u64;
@@ -32,14 +25,26 @@ where
     K: Debug + Default + Clone + Copy + Ord + Serialize + DeserializeOwned,
     V: Debug + Default + Clone + Copy + Serialize + DeserializeOwned,
 {
-    pub fn get(&self, key: &K) -> Option<V> {
+
+    // Returns the associated value for `key` as `Some(value)` or `None` if it's not present.
+    //
+    fn get(&self, key: &K) -> Option<V> {
         match self.keys.binary_search(key) {
             Ok(i) => Some(self.entries[i]),
             Err(_) => None,
         }
     }
 
-    pub fn set(mut self, btree: &mut BTree<K, V>, key: K, value: V) -> Result<(Option<(K, PagePtr)>, Option<V>)>
+    // Inserts a `key`/`value` pair
+    //
+    // This method returns different kinds of information depending on the situation:
+    //   - If the key is already present, the value will be overwritten and the
+    //     old value will be returned as `Ok((None, Some(old_value)))`.
+    //   - If the key is new, the key/value pair is inserted. Now we have 2 cases to consider:
+    //     1. The node is not yet full: nothing more to do, return `Ok((None, None))`.
+    //     2. The node is full: it needs to be split up, return `Ok((Some((split_key, new_page_nr)), None))`.
+    //
+    fn set(mut self, btree: &mut BTree<K, V>, key: K, value: V) -> Result<(Option<(K, PagePtr)>, Option<V>)>
     where
         V: Debug + Clone + Copy + Serialize + DeserializeOwned,
     {
@@ -71,14 +76,21 @@ where
         }
     }
 
-    fn rem(mut self, btree: &mut BTree<K, V>, key: K, parent: Option<&mut Internal<K>>, path_info: Option<&ChildNodeInfo>) -> Result<(Option<V>, Option<PagePtr>)> {
+    fn remove(
+        mut self,
+        btree: &mut BTree<K, V>,
+        key: K,
+        parent: Option<&mut Internal<K>>,
+        path_info: Option<&ChildNodeInfo>,
+    ) -> Result<(Option<V>, Option<PagePtr>)> {
         match self.keys.binary_search(&key) {
             Err(_) => Ok((None, None)),
             Ok(i) => {
                 self.keys.remove(i);
                 let original_value = Some(self.entries.remove(i));
                 let mut deleted_page = None;
-                if self.keys.len() < btree.split_at as usize && parent.is_some() { // else this is the root node => nothing more to dead_code
+                if self.keys.len() < btree.split_at as usize && parent.is_some() {
+                    // else this is the root node => nothing more to dead_code
                     let parent = parent.unwrap();
                     let path_info = path_info.unwrap();
                     let mut done = false;
@@ -170,7 +182,7 @@ where
         Ok(())
     }
 
-    pub fn deserialize_from(fh: &File, page_nr: u64) -> Result<Self> {
+    fn deserialize_from(fh: &File, page_nr: u64) -> Result<Self> {
         let node = Self {
             page_nr,
             keys: bincode::deserialize_from(fh)?,
@@ -215,8 +227,8 @@ pub struct Internal<K> {
 #[derive(Debug)]
 struct ChildNodeInfo {
     page_nr: PagePtr,
-    lparent: Option<usize>,     // LeftSubtree(keys[lparent]) == page_nr
-    rparent: Option<usize>,     // RightSubtree(keys[rparent]) == page_nr
+    lparent: Option<usize>, // LeftSubtree(keys[lparent]) == page_nr
+    rparent: Option<usize>, // RightSubtree(keys[rparent]) == page_nr
     lsibling: Option<PagePtr>,
     rsibling: Option<PagePtr>,
 }
@@ -226,14 +238,14 @@ impl<K> Internal<K>
 where
     K: Debug + Default + Clone + Copy + Ord + Serialize + DeserializeOwned,
 {
-    pub fn get(&self, key: &K) -> PagePtr {
+    fn get(&self, key: &K) -> PagePtr {
         match self.keys.binary_search(key) {
             Ok(i) => self.entries[i + 1], // keys[i] == key -> right subtree
             Err(i) => self.entries[i],    // keys[i] > key -> left subtree
         }
     }
 
-    pub fn set<V>(mut self, btree: &mut BTree<K, V>, key: K, value: V) -> Result<(Option<(K, PagePtr)>, Option<V>)>
+    fn set<V>(mut self, btree: &mut BTree<K, V>, key: K, value: V) -> Result<(Option<(K, PagePtr)>, Option<V>)>
     where
         V: Debug + Default + Clone + Copy + Serialize + DeserializeOwned,
     {
@@ -244,12 +256,12 @@ where
         };
         match return_value {
             (None, v) => Ok((None, v)),
-            (Some((key, page_nr)), v) => match self.keys.binary_search(&key) {
+            (Some((key, page_nr)), _) => match self.keys.binary_search(&key) {
                 Err(i) => match self.is_full(btree.max_key_count) {
                     true => {
                         let (split_key, mut new_node) = self.split(btree.next_page_nr(), btree.split_at);
                         let split_page_nr = new_node.page_nr;
-                        match i < btree.split_at  {
+                        match i < btree.split_at {
                             true => self.insert(i, key, page_nr),
                             // minus 1 because we're taking the split_key out!
                             false => new_node.insert(i - btree.split_at - 1, key, page_nr),
@@ -269,23 +281,6 @@ where
         }
     }
 
-    fn get_index_with_siblings(&self, key: &K) -> (K, bool, usize, usize, Option<usize>, Option<usize>) {
-        let (parent_key, is_right_subtree, key_index, next_index) = match self.keys.binary_search(key) {
-            Ok(i) => (self.keys[i], true, i, i + 1), // keys[i] == key -> right subtree
-            Err(i) => {
-                let k = if i > 0 {
-                    self.keys[i - 1]
-                } else {
-                    self.keys[i]
-                };
-                (k, false, i, i)
-            },    // keys[i] > key -> left subtree
-        };
-        let left_sibling = if next_index > 0 { Some(next_index - 1) } else { None };
-        let right_sibling = if self.entries.len() > next_index + 1 { Some(next_index + 1) } else { None };
-        (parent_key, is_right_subtree, key_index, next_index, left_sibling, right_sibling)
-    }
-
     fn get_child_node_info(&self, key: &K) -> ChildNodeInfo {
         match self.keys.binary_search(key) {
             Ok(i) => {
@@ -297,7 +292,7 @@ where
                     lsibling: Some(self.entries[i]),
                     rsibling: if i < self.entries.len() - 2 { Some(self.entries[i + 2]) } else { None },
                 }
-            },
+            }
             Err(i) => {
                 // not found: keys(i) > key -> left subtree
                 ChildNodeInfo {
@@ -307,18 +302,24 @@ where
                     lsibling: if i > 0 { Some(self.entries[i - 1]) } else { None },
                     rsibling: if i < self.entries.len() - 1 { Some(self.entries[i + 1]) } else { None },
                 }
-            },
+            }
         }
     }
 
-    fn rem<V>(mut self, btree: &mut BTree<K, V>, key: K, parent: Option<&mut Internal<K>>, path_info: Option<&ChildNodeInfo>) -> Result<(Option<V>, Option<PagePtr>)>
+    fn remove<V>(
+        mut self,
+        btree: &mut BTree<K, V>,
+        key: K,
+        parent: Option<&mut Internal<K>>,
+        path_info: Option<&ChildNodeInfo>,
+    ) -> Result<(Option<V>, Option<PagePtr>)>
     where
         V: Debug + Default + Clone + Copy + Serialize + DeserializeOwned,
     {
         let child_info = self.get_child_node_info(&key);
         let (original_value, deleted_page) = match btree.load_node(child_info.page_nr)? {
-            BTNode::Internal(node) => node.rem(btree, key, Some(&mut self), Some(&child_info))?,
-            BTNode::Leaf(node) => node.rem(btree, key, Some(&mut self), Some(&child_info))?,
+            BTNode::Internal(node) => node.remove(btree, key, Some(&mut self), Some(&child_info))?,
+            BTNode::Leaf(node) => node.remove(btree, key, Some(&mut self), Some(&child_info))?,
         };
 
         let result = match deleted_page {
@@ -332,43 +333,38 @@ where
         result
     }
 
-    fn remove_page<V>(&mut self, btree: &mut BTree<K, V>, page_nr: PagePtr, parent: Option<&mut Internal<K>>, path_info: Option<&ChildNodeInfo>) -> Result<Option<PagePtr>>
+    fn remove_page<V>(
+        &mut self,
+        btree: &mut BTree<K, V>,
+        page_nr: PagePtr,
+        parent: Option<&mut Internal<K>>,
+        path_info: Option<&ChildNodeInfo>,
+    ) -> Result<Option<PagePtr>>
     where
         V: Debug + Default + Clone + Copy + Serialize + DeserializeOwned,
     {
         match self.entries.binary_search(&page_nr) {
             Err(_) => panic!("Programming error: deleted page should be present!"),
             Ok(i) => {
-                let removed_key = self.keys.remove(i - 1);
+                self.keys.remove(i - 1);
                 self.entries.remove(i);
 
                 let deleted_page = match parent {
-                    None => { // This is the root node!
+                    None => {
+                        // This is the root node!
                         if self.keys.len() == 0 {
                             // We're at the root and it's last key has just been removed
+                            // The tree collapses into 1 leaf node.
                             let new_root_page_nr = self.entries[0];
-                            match btree.load_node(new_root_page_nr)? {
-                                BTNode::Leaf(_) => {},  // it's a Leaf: nothing more to do!
-                                BTNode::Internal(new_root) => {
-                                    match new_root.keys.binary_search(&removed_key) {
-                                        Ok(_) => {},  // panic!("Key {:?} not expected to be present\nself: {:?}\nnew_root: {:?}", removed_key, self, new_root),
-                                        Err(i) => {
-                                            // new_root.keys.insert(i, removed_key);
-                                            // btree.store_node(&BTNode::Internal(new_root))?;
-                                            panic!("Key {:?} expected to be present\nself: {:?}\nnew_root: {:?}", removed_key, self, new_root);
-                                        }
-                                    }
-                                },
-                            }
                             btree.root_page_nr = new_root_page_nr;
                             btree.on_page_deleted(self.page_nr);
                             Some(self.page_nr)
                         } else {
                             None
                         }
-                    },
+                    }
 
-                    Some(parent) => { 
+                    Some(parent) => {
                         let mut deleted_page = None;
                         if self.keys.len() < btree.split_at as usize {
                             let path_info = path_info.unwrap();
@@ -422,10 +418,9 @@ where
                                     deleted_page = Some(node.page_nr);
                                 }
                             }
-
                         }
                         deleted_page
-                    },
+                    }
                 };
                 Ok(deleted_page)
             }
@@ -465,7 +460,7 @@ where
         Ok(())
     }
 
-    pub fn deserialize_from(fh: &File, page_nr: u64) -> Result<Self> {
+    fn deserialize_from(fh: &File, page_nr: u64) -> Result<Self> {
         let node = Self { page_nr, keys: bincode::deserialize_from(fh)?, entries: bincode::deserialize_from(fh)? };
         Ok(node)
     }
@@ -473,7 +468,6 @@ where
     pub fn keys(self) -> std::vec::IntoIter<K> {
         self.keys.into_iter()
     }
-
 }
 
 
@@ -497,6 +491,22 @@ where
         BTNode::Internal(Internal::new(page_nr, keys, entries))
     }
 
+    pub fn get(self, btree: &mut BTree<K, V>, key: K) -> Result<Option<V>> {
+        // "self" is the root page!
+        match self {
+            BTNode::Leaf(node) => return Ok(node.get(&key)),
+            BTNode::Internal(node) => {
+                let mut page_nr = node.get(&key);
+                loop {
+                    match btree.load_node(page_nr)? {
+                        BTNode::Leaf(node) => return Ok(node.get(&key)),
+                        BTNode::Internal(node) => page_nr = node.get(&key),
+                    }
+                }
+            },
+        }
+    }
+
     pub fn set(self, btree: &mut BTree<K, V>, key: K, value: V) -> Result<(Option<(K, PagePtr)>, Option<V>)> {
         // "self" is the root page!
         match self {
@@ -507,9 +517,9 @@ where
 
     pub fn remove(self, btree: &mut BTree<K, V>, key: K) -> Result<Option<V>> {
         // "self" is the root page!
-        let (original_value, deleted_page) = match self {
-            BTNode::Internal(node) => node.rem(btree, key, None, None)?,
-            BTNode::Leaf(node) => node.rem(btree, key, None, None)?,
+        let (original_value, _) = match self {
+            BTNode::Internal(node) => node.remove(btree, key, None, None)?,
+            BTNode::Leaf(node) => node.remove(btree, key, None, None)?,
         };
         Ok(original_value)
     }
@@ -565,6 +575,7 @@ where
         }
     }
 
+    // Only for debugging
     pub fn dump(&self, btree: &mut BTree<K, V>) -> Result<()> {
         // This is the root node
         match self {
@@ -581,13 +592,15 @@ where
                                 Self::Internal(_) => {
                                     count += 1;
                                     all_nodes.push(page_nr);
-                                },
+                                }
                                 Self::Leaf(_) => {
                                     break;
                                 }
                             }
                         }
-                        if count == 0 { break; }
+                        if count == 0 {
+                            break;
+                        }
                     }
                     if count > 0 {
                         start = end;
@@ -601,13 +614,13 @@ where
                     println!("{:?}", btree.load_node(page_nr)?);
                 }
                 self.dump_leafs(btree)?;
-            },
+            }
             Self::Leaf(node) => println!("{:?}", node),
         }
-
         Ok(())
     }
 
+    // Only for debugging
     pub fn dump_leafs(&self, btree: &mut BTree<K, V>) -> Result<()> {
         let mut page_nr = Some(0);
         while page_nr.is_some() {
@@ -620,18 +633,17 @@ where
 
     fn leaf_node(self) -> Leaf<K, V> {
         match self {
-            BTNode::Internal(_) => panic!("Expected a leaf node, got an Internal"),
+            BTNode::Internal(_) => panic!("Expected a Leaf, got an Internal"),
             BTNode::Leaf(node) => node,
         }
     }
 
     fn internal_node(self) -> Internal<K> {
         match self {
-            BTNode::Leaf(_) => panic!("Expected an internal node, got a Leaf"),
+            BTNode::Leaf(_) => panic!("Expected an Internal, got a Leaf"),
             BTNode::Internal(node) => node,
         }
     }
-
 }
 
 
@@ -640,6 +652,14 @@ mod tests {
     // Note this useful idiom: importing names from outer (for mod tests) scope.
     use super::*;
     use tempfile::TempDir;
+
+    fn dump_btree(bt: &mut BTree<u128, u128>) -> Result<()> {
+        println!("==== BTree");
+        println!("{:?}", bt);
+        bt.root()?.dump(bt)?;
+        println!("====");
+        Ok(())
+    }
 
     #[test]
     fn test_set() -> Result<()> {
@@ -654,7 +674,7 @@ mod tests {
 
         // Fill the first leaf
         for i in 1..=4 {
-            bt.set(i, i*10)?;
+            bt.set(i, i * 10)?;
         }
         assert_eq!(bt.root()?.len(), 4);
 
@@ -669,7 +689,7 @@ mod tests {
 
         // Fill the root
         for i in 8..=11 {
-            bt.set(i, i*10)?;
+            bt.set(i, i * 10)?;
         }
         assert_eq!(bt.root()?.len(), 4);
 
@@ -700,7 +720,7 @@ mod tests {
         // [10, 20] [30, 40] [50, 60] [70, 80] [90, 100] [110, 120] [130, 140, 150]
         //
         for i in 1..=15 {
-            bt.set(i*10, i*100)?;
+            bt.set(i * 10, i * 100)?;
         }
         dump_btree(&mut bt)?;
         assert_eq!(bt.node_count, 10);
@@ -780,20 +800,12 @@ mod tests {
 
         // Remove 20, 40, 50, 60, 80, 90, 130 and 140 so that the root collapses into 1 leaf(0)
         for i in [20_u128, 40, 50, 60, 80, 90, 130, 140].iter() {
-            assert_eq!(bt.remove(*i)?, Some(i*10));
+            assert_eq!(bt.remove(*i)?, Some(i * 10));
         }
         dump_btree(&mut bt)?;
         assert_eq!(bt.node_count, 1);
         assert_eq!(bt.len(), 3);
 
-        Ok(())
-    }
-
-    fn dump_btree(bt: &mut BTree<u128, u128>) -> Result<()> {
-        println!("==== BTree");
-        println!("{:?}", bt);
-        bt.root()?.dump(bt)?;
-        println!("====");
         Ok(())
     }
 
@@ -807,7 +819,7 @@ mod tests {
         // 2 level 1 internal nodes
         // 1 root node
         for i in 1..=22 {
-            bt.set(i*10, i*100)?;
+            bt.set(i * 10, i * 100)?;
         }
         dump_btree(&mut bt)?;
         assert_eq!(bt.node_count, 10);
@@ -837,7 +849,7 @@ mod tests {
         assert_eq!(bt.len(), 18);
 
         for i in [10, 20_u128, 40, 50, 60, 80, 90, 120, 130, 140, 170, 200, 220].iter() {
-            assert_eq!(bt.remove(*i)?, Some(i*10));
+            assert_eq!(bt.remove(*i)?, Some(i * 10));
         }
         dump_btree(&mut bt)?;
         assert_eq!(bt.node_count, 1);
@@ -857,7 +869,7 @@ mod tests {
         // 5 level 2 internal nodes
         // 14 leaf nodes
         for i in 1..=29 {
-            bt.set(i, i*10)?;
+            bt.set(i, i * 10)?;
         }
         dump_btree(&mut bt)?;
         assert_eq!(bt.node_count, 22);
@@ -891,8 +903,8 @@ mod tests {
         assert_eq!(bt.len(), 22);
 
         for i in [1, 3, 9, 11, 13, 15, 17, 19, 21, 23, 25].iter() {
-            assert_eq!(bt.remove(*i)?, Some(i*10));
-            assert_eq!(bt.get(*i + 1)?, Some((i+1)*10));
+            assert_eq!(bt.remove(*i)?, Some(i * 10));
+            assert_eq!(bt.get(*i + 1)?, Some((i + 1) * 10));
         }
         dump_btree(&mut bt)?;
         assert_eq!(bt.node_count, 6);
@@ -900,5 +912,4 @@ mod tests {
 
         Ok(())
     }
-
 }

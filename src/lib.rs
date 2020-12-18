@@ -1,6 +1,6 @@
-#![allow(dead_code)]
-#![allow(unused_variables)]
-#![allow(unused_imports)]
+// #![allow(dead_code)]
+// #![allow(unused_variables)]
+// #![allow(unused_imports)]
 
 mod error;
 mod node;
@@ -11,7 +11,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     fmt::Debug,
     fs::{self, File, OpenOptions},
-    io::{self, Read, Seek, SeekFrom, Write},
+    io::{Seek, SeekFrom, Write},
     marker::PhantomData,
     mem,
     path::{Path, PathBuf},
@@ -133,13 +133,7 @@ where
         if self.len() == 0 {
             return Ok(None);
         }
-        let mut page_nr = self.root_page_nr;
-        loop {
-            match self.load_node(page_nr)? {
-                BTNode::Leaf(node) => return Ok(node.get(&key)),
-                BTNode::Internal(node) => page_nr = node.get(&key),
-            }
-        }
+        self.load_node(self.root_page_nr)?.get(self, key)
     }
 
     pub fn set(&mut self, key: K, value: V) -> Result<Option<V>> {
@@ -239,7 +233,7 @@ where
     }
 
     pub fn root(&mut self) -> Result<BTNode<K, V>> {
-        self.load_node(self.root_page_nr).or_else(|err| {
+        self.load_node(self.root_page_nr).or_else(|_err| {
             // FIXME: better error checking here?
             self.root_page_nr = self.next_page_nr();
             Ok(BTNode::new_leaf(self.root_page_nr, &[], &[], None))
@@ -247,11 +241,9 @@ where
     }
 
     pub fn load_node(&mut self, page_nr: u64) -> Result<BTNode<K, V>> {
+        assert!(!self.emtpy_pages.contains(&page_nr), "Programming error: Page {:?} requested, but it has been deleted", page_nr);
         if self.fh.is_none() {
             self.fh = Some(OpenOptions::new().read(true).write(true).create(true).open(db_path(&self.directory))?);
-        }
-        if self.emtpy_pages.contains(&page_nr) {
-            panic!("Page {:?} requested, but it has been deleted", page_nr);
         }
         let fh = self.fh.as_mut().ok_or(Error::InvalidFileHandle)?;
         let offset = PAGE_SIZE * page_nr;
