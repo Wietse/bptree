@@ -108,6 +108,14 @@ where
     K: Debug + Default + Clone + Ord + Serialize + DeserializeOwned,
     V: Debug + Default + Clone + Serialize + DeserializeOwned,
 {
+
+    /// Creates a `BTree` in `directory`.
+    ///
+    /// If `directory` doesn't exist it will be created.
+    /// If there is already a `BTree`in `directory` it will be loaded.
+    ///
+    /// The `override_max_key_count` should disappear soon, it's really only used for testing.
+    ///
     pub fn open<P: AsRef<Path>>(directory: P, override_max_key_count: Option<u64>) -> Result<Self> {
         fs::create_dir_all(&directory)?;
         let meta_path = meta_file_path(directory.as_ref());
@@ -117,18 +125,27 @@ where
         }
     }
 
+    /// Returns the number of entries in the `BTree`
+    ///
     pub fn len(&self) -> usize {
         self.entry_count as usize
     }
 
+    /// Returns a `BTreeIterator` that allows iterating over the keys in the `BTree`.
+    ///
     pub fn keys(&mut self) -> BTreeIterator<K, V> {
         BTreeIterator::new(self).unwrap().into_iter()
     }
 
+    /// Returns a `BTreeValueIterator` that allows iterating over the values in the `BTree`.
+    ///
     pub fn values(&mut self) -> BTreeValueIterator<K, V> {
         BTreeValueIterator::new(self).unwrap().into_iter()
     }
 
+    /// Returns the value associated with `key` as `Ok(Some(value))` if found, returns Ok(None) if
+    /// the key is not present.
+    /// 
     pub fn get(&mut self, key: K) -> Result<Option<V>> {
         if self.len() == 0 {
             return Ok(None);
@@ -136,6 +153,10 @@ where
         self.load_node(self.root_page_nr)?.get(self, key)
     }
 
+    /// Insert a key/value pair in the `BTree`.
+    /// Returns `Ok(None)` if the key was not already present, returns the original value
+    /// as `Ok(Some(value))` if the key was already present.
+    ///
     pub fn set(&mut self, key: K, value: V) -> Result<Option<V>> {
         if self.len() == 0 {
             self.create_first_root(key, value)?;
@@ -152,6 +173,10 @@ where
         Ok(original_value)
     }
 
+    /// Removes a key/value pair from the `BTree`.
+    /// Returns `Ok(None)` if the key was not found, returns the associated value
+    /// as `Ok(Some(value))` if the key was found (and removed).
+    ///
     pub fn remove(&mut self, key: K) -> Result<Option<V>> {
         match self.len() > 0 {
             true => {
@@ -232,7 +257,7 @@ where
         Ok(())
     }
 
-    pub fn root(&mut self) -> Result<BTNode<K, V>> {
+    fn root(&mut self) -> Result<BTNode<K, V>> {
         self.load_node(self.root_page_nr).or_else(|_err| {
             // FIXME: better error checking here?
             self.root_page_nr = self.next_page_nr();
@@ -240,7 +265,7 @@ where
         })
     }
 
-    pub fn load_node(&mut self, page_nr: u64) -> Result<BTNode<K, V>> {
+    fn load_node(&mut self, page_nr: u64) -> Result<BTNode<K, V>> {
         assert!(!self.emtpy_pages.contains(&page_nr), "Programming error: Page {:?} requested, but it has been deleted", page_nr);
         if self.fh.is_none() {
             self.fh = Some(OpenOptions::new().read(true).write(true).create(true).open(db_path(&self.directory))?);
@@ -267,6 +292,12 @@ where
         if padding > 0 {
             fh.write_all(&vec![0u8; padding as usize])?;
         }
+        Ok(())
+    }
+
+    pub fn dump(&mut self) -> Result<()> {
+        println!("{:?}", self);
+        self.root()?.dump(self)?;
         Ok(())
     }
 }

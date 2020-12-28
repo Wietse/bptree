@@ -17,7 +17,14 @@ num-integer = "0.1"
 # predicates = "1.0.0"
 tempfile = "3.0.7"
 # walkdir = "2.2.7"
+csv = "1.1"
+criterion = "0.3"
 
 [lib]
 test = true
 doctest = false
+bench = false
+
+[[bench]]
+name = "bench"
+harness = false

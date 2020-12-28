@@ -2,3 +2,4 @@
 Cargo.lock
 NetrwTreeListing
 temp*/
+.vim
